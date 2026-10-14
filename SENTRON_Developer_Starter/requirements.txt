@@ -1,0 +1,4 @@
+# Agree versions before installation
+PySide6
+psutil
+pytest
