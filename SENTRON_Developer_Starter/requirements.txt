@@ -1,4 +1,4 @@
-# Agree versions before installation
-PySide6
-psutil
-pytest
+# SENTRON V1 Core & Development Dependencies (Python 3.11+)
+PySide6>=6.5.0
+psutil>=5.9.0
+pytest>=7.4.0
