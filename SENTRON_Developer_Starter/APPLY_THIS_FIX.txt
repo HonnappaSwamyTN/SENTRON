@@ -1,0 +1,18 @@
+SENTRON Dev 2 — Policy Security Fix
+
+Files in this archive are relative to SENTRON_Developer_Starter/:
+- src/sentron/agentguard/policy.py
+- tests/unit/test_policy.py
+- tests/unit/test_executor.py
+
+Apply by extracting these three files into your existing SENTRON_Developer_Starter folder and allowing replacement of these specific files. Do not delete the starter folder or replace the entire repository.
+
+Changes:
+- Add agent_id as a policy selector.
+- Require ALLOW rules to specify agent_id, tool_name, and operation.
+- Require target for file operations, destination for messaging/upload/share operations, and target or destination for other ALLOW rules.
+- Update tests and add regression coverage for missing agent scope, cross-agent matches, and broad target rules.
+
+Validation performed on this packaged working copy:
+python -m pytest -q
+Result: 22 passed.
