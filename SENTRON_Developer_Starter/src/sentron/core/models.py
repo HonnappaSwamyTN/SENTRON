@@ -87,3 +87,85 @@ class ExecutionResult:
     approval_id: str | None = None
     output: Any = None
 
+
+@dataclass(frozen=True, slots=True)
+class RiskSignal:
+    finding_type: str
+    evidence_snippet: str
+    risk_level: str  # low, medium, high, critical
+    details: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessSummary:
+    pid: int
+    name: str
+    cpu_percent: float
+    memory_mb: float
+
+
+@dataclass(frozen=True, slots=True)
+class SystemSnapshot:
+    timestamp: float
+    cpu_percent: float
+    memory_percent: float
+    memory_available_bytes: int
+    disk_free_bytes: int
+    disk_busy_percent: float | None = None
+    top_processes: tuple[ProcessSummary, ...] = ()
+    unavailable_metrics: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "top_processes", tuple(self.top_processes))
+        object.__setattr__(self, "unavailable_metrics", tuple(self.unavailable_metrics))
+
+
+@dataclass(frozen=True, slots=True)
+class RiskAlert:
+    alert_id: str
+    metric_name: str
+    severity: str  # warning, critical
+    observed_value: float
+    threshold_value: float
+    duration_seconds: float
+    cooldown_until: float
+    timestamp: float
+    is_simulated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class WindowsEvidence:
+    event_id: int
+    log_channel: str
+    source: str
+    event_time: str
+    description: str
+    raw_data: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryRecommendation:
+    recommendation_id: str
+    severity: str
+    title: str
+    suggested_action: str
+    confirmed_observations: tuple[str, ...] = ()
+    suspected_causes: tuple[str, ...] = ()
+    is_automated: bool = False  # Always False in V1
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "confirmed_observations", tuple(self.confirmed_observations))
+        object.__setattr__(self, "suspected_causes", tuple(self.suspected_causes))
+
+
+@dataclass(frozen=True, slots=True)
+class UnifiedEvent:
+    event_id: str
+    timestamp: float
+    subsystem: str  # AgentGuard, CrashGuard, Core
+    event_type: str
+    severity: str  # info, warning, critical
+    summary: str
+    payload_json: str
+    redacted: bool = False
+
