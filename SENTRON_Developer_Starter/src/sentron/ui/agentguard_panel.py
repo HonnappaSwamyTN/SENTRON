@@ -66,7 +66,7 @@ class AgentGuardPanel(QWidget):
         # Header section
         header_layout = QHBoxLayout()
         title_label = QLabel("🛡️ AgentGuard Governance Engine")
-        title_label.setStyleSheet("font-size: 15px; font-weight: 700; color: #58a6ff;")
+        title_label.setStyleSheet("font-size: 16px; font-weight: 800; color: #171717;")
         status_badge = QLabel("GATEKEEPER ACTIVE • FAIL-CLOSED")
         status_badge.setObjectName("badgeActive")
 

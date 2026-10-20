@@ -54,7 +54,7 @@ class CrashGuardPanel(QWidget):
         # Header with live status badge and timestamp
         header_layout = QHBoxLayout()
         title_label = QLabel("⚡ CrashGuard System Health Guardian")
-        title_label.setStyleSheet("font-size: 15px; font-weight: 700; color: #58a6ff;")
+        title_label.setStyleSheet("font-size: 16px; font-weight: 800; color: #171717;")
 
         self.lbl_status = QLabel("MONITORING ACTIVE • 2s CADENCE")
         self.lbl_status.setObjectName("badgeActive")
@@ -204,23 +204,23 @@ class CrashGuardPanel(QWidget):
         card = QFrame()
         card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         card.setStyleSheet(
-            "background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px;"
+            "background-color: #171717; border: 1px solid #333333; border-radius: 8px; padding: 10px;"
         )
         layout = QVBoxLayout(card)
         layout.setSpacing(2)
 
         lbl_t = QLabel(title)
-        lbl_t.setStyleSheet("color: #8b949e; font-size: 11px; font-weight: 700; letter-spacing: 0.5px;")
+        lbl_t.setStyleSheet("color: #D9D4C8; font-size: 11px; font-weight: 700; letter-spacing: 0.5px;")
         layout.addWidget(lbl_t)
 
         lbl_v = QLabel(value)
         lbl_v.setObjectName("valLabel")
-        lbl_v.setStyleSheet("color: #f0f6fc; font-size: 22px; font-weight: 800; margin: 2px 0;")
+        lbl_v.setStyleSheet("color: #E2B83B; font-size: 22px; font-weight: 800; margin: 2px 0;")
         layout.addWidget(lbl_v)
 
         lbl_s = QLabel(subtitle)
         lbl_s.setObjectName("subLabel")
-        lbl_s.setStyleSheet("color: #6e7681; font-size: 11px;")
+        lbl_s.setStyleSheet("color: #8C8578; font-size: 11px;")
         layout.addWidget(lbl_s)
 
         return card
@@ -236,18 +236,18 @@ class CrashGuardPanel(QWidget):
         if cpu_val_lbl:
             cpu_val_lbl.setText(f"{snapshot.cpu_percent:.1f}%")
             if snapshot.cpu_percent >= 85.0:
-                cpu_val_lbl.setStyleSheet("color: #f85149; font-size: 22px; font-weight: 800;")
+                cpu_val_lbl.setStyleSheet("color: #E05252; font-size: 22px; font-weight: 800;")
             else:
-                cpu_val_lbl.setStyleSheet("color: #58a6ff; font-size: 22px; font-weight: 800;")
+                cpu_val_lbl.setStyleSheet("color: #E2B83B; font-size: 22px; font-weight: 800;")
 
         ram_val_lbl = self.card_ram.findChild(QLabel, "valLabel")
         ram_sub_lbl = self.card_ram.findChild(QLabel, "subLabel")
         if ram_val_lbl:
             ram_val_lbl.setText(f"{snapshot.memory_percent:.1f}%")
             if snapshot.memory_percent >= 85.0:
-                ram_val_lbl.setStyleSheet("color: #d29922; font-size: 22px; font-weight: 800;")
+                ram_val_lbl.setStyleSheet("color: #E05252; font-size: 22px; font-weight: 800;")
             else:
-                ram_val_lbl.setStyleSheet("color: #3fb950; font-size: 22px; font-weight: 800;")
+                ram_val_lbl.setStyleSheet("color: #F5F2E9; font-size: 22px; font-weight: 800;")
         if ram_sub_lbl:
             avail_mb = snapshot.memory_available_bytes / (1024 * 1024)
             ram_sub_lbl.setText(f"Available: {avail_mb:.0f} MB")
