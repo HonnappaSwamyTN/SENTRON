@@ -97,6 +97,24 @@ class RiskSignal:
 
 
 @dataclass(frozen=True, slots=True)
+class SecretFinding:
+    category: str  # e.g. "API_KEY", "PASSWORD", "BEARER_TOKEN", "EMAIL"
+    start: int
+    end: int
+    length: int
+    preview: str  # Masked preview only (e.g., "sk-****", "****"), NEVER the raw secret
+    details: str
+
+    @property
+    def matched_snippet(self) -> str:
+        return self.preview
+
+    @property
+    def redacted_replacement(self) -> str:
+        return f"[REDACTED_{self.category}]"
+
+
+@dataclass(frozen=True, slots=True)
 class ProcessSummary:
     pid: int
     name: str
