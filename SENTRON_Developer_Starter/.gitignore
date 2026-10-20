@@ -20,3 +20,6 @@ logs/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Documentation build previews
+docs/rendered_pages/

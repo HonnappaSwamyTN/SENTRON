@@ -157,3 +157,4 @@ For detailed documentation, refer to the following authoritative guides in `SENT
 - [Security & Privacy Rules](file:///c:/Users/Honnu/OneDrive/Desktop/kagada/SENTRON/SENTRON_Developer_Starter/SECURITY_RULES.md) — Redaction, default-deny, and offline operation standards.
 - [Development Workflow & Setup](file:///c:/Users/Honnu/OneDrive/Desktop/kagada/SENTRON/SENTRON_Developer_Starter/DEVELOPMENT_WORKFLOW.md) — Branching, testing, and implementation protocols.
 - [Architecture Decision Log](file:///c:/Users/Honnu/OneDrive/Desktop/kagada/SENTRON/SENTRON_Developer_Starter/DECISIONS.md) — Formally frozen design decisions.
+- [Project Report PDF](SENTRON_Developer_Starter/docs/SENTRON_V1_Project_Report.pdf) — Comprehensive 24-page formal project report with architecture diagrams and verification results.
