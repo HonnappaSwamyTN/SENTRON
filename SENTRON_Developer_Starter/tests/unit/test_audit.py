@@ -185,3 +185,56 @@ def test_compatibility_with_controlled_executor():
     assert event_types == ["execution_succeeded", "policy_decision"]
     assert all(e.subsystem == "AgentGuard" for e in events)
     assert all(e.payload["action_id"] == request.action_id for e in events)
+
+
+def test_session_id_persistence_and_search():
+    audit = SqliteAuditLog(":memory:")
+    event_with_sess = AuditEvent(
+        event_type="policy_decision",
+        action_id="act-session-1",
+        agent_id="agent-audit",
+        decision=Decision.ALLOW,
+        reason_code="rule_allowed",
+        session_id="session-trace-999",
+    )
+    event_without_sess = AuditEvent(
+        event_type="policy_decision",
+        action_id="act-session-2",
+        agent_id="agent-audit",
+        decision=Decision.ALLOW,
+        reason_code="rule_allowed",
+        session_id="session-trace-888",
+    )
+    audit.record_event(event_with_sess)
+    audit.record_event(event_without_sess)
+
+    results = audit.search_events(session_id="session-trace-999")
+    assert len(results) == 1
+    assert results[0].payload["action_id"] == "act-session-1"
+    assert results[0].payload["session_id"] == "session-trace-999"
+
+
+def test_session_id_and_secret_redaction_combined():
+    audit = SqliteAuditLog(":memory:")
+    event = AuditEvent(
+        event_type="policy_decision",
+        action_id="act-redact-sess",
+        agent_id="agent-audit",
+        decision=Decision.ASK,
+        reason_code="secret_detected",
+        explanation="Detected API key sk-abcdef1234567890abcdef123456 in session context",
+        session_id="session-secure-777",
+    )
+    stored = audit.record_event(event)
+    assert stored.redacted is True
+    assert "sk-abcdef1234567890abcdef123456" not in stored.summary
+    assert "sk-abcdef1234567890abcdef123456" not in stored.payload_json
+    assert "[REDACTED_API_KEY]" in stored.payload_json
+
+    # Session ID must still be intact and searchable
+    results = audit.search_events(session_id="session-secure-777")
+    assert len(results) == 1
+    assert results[0].payload["session_id"] == "session-secure-777"
+    assert results[0].redacted is True
+
+

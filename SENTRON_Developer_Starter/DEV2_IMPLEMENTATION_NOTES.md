@@ -1,21 +1,33 @@
-# Dev 2 Implementation Notes
+# Dev 2 Implementation Notes: AgentGuard Policy, Approval, and Execution
 
-## Implemented in this starter patch
+## Implemented in this version
 
-- `src/sentron/core/models.py`: shared `ActionRequest`, `Decision`, `PolicyResult`, `AuditEvent`, and `ExecutionResult` contracts. This file was missing even though `ARCHITECTURE.md` described it.
-- `src/sentron/agentguard/policy.py`: deterministic rules; default `ASK`; explicit `ALLOW`; `BLOCK` takes precedence; risk flags and sensitive classifications require review; selected prohibited operations are blocked.
-- `src/sentron/agentguard/approval.py`: expiring, single-use-by-default approvals bound to agent/tool/operation/target/destination/recipient/purpose/task/data classification/risk flags/untrusted-context references/session.
-- `src/sentron/agentguard/executor.py`: controlled execution boundary; blocks execution before authorization; records policy, approval, and execution outcomes through an injected audit sink; does not log exception messages.
-- Unit tests covering policy decisions, scope changes, expiry, session binding, executor gating, and audit events.
-
-## Current limitations (intentional)
-
-- `ApprovalManager` is in-memory. Approval persistence is not implemented.
-- `InMemoryAuditLog` is for development/tests only. It must later be connected to the shared SQLite event store through the `AuditSink` interface.
-- The action handler is injected. Use only a safe mock handler for the initial demo; this patch does not implement real file, network, email, or shell actions.
-- Dev 1's analyzer is not implemented here. Its structured `risk_flags` can be passed into `ActionRequest` once the Dev 1 interface is agreed.
-- The policy defaults to `ASK` unless an explicit allow rule matches. Do not add broad allow rules just to make the demo look smoother.
-- `ALWAYS_BLOCK_OPERATIONS` is a conservative initial list and should be reviewed against the final operation vocabulary before release.
+- `src/sentron/core/models.py`:
+  - Shared `ActionRequest`, `Decision`, `PolicyResult`, `AuditEvent`, and `ExecutionResult` contracts.
+  - Added `session_id: str | None = None` to `AuditEvent` dataclass for end-to-end audit session correlation.
+  - Fail-closed constructor validation ensuring `agent_id`, `tool_name`, and `operation` are non-empty strings.
+- `src/sentron/agentguard/policy.py`:
+  - Strict agent-specific policy scoping: ALLOW rules require explicit `agent_id`, `tool_name`, `operation`, and resource target or destination.
+  - Overly broad rule rejection: Rejects wildcards (`*`, `?`) and broad catch-alls (`all`, `any`) in ALLOW rules.
+  - Deterministic evaluation:
+    - Precedence: `BLOCK` > `ASK` > `ALLOW`.
+    - Always-block operations (`disable_security`, `steal_credentials`, `exfiltrate_data`, `format_disk`).
+    - Dev1 suspicious-input `risk_flags` trigger `Decision.ASK` (`risk_flags_present`).
+    - Sensitive data classifications trigger `Decision.ASK` (`sensitive_data_requires_review`).
+    - Fallback is `Decision.ASK` (`no_matching_allow_rule`).
+  - Safe denial on malformed requests: Missing or invalid agent identities (`*`, empty, none) return `Decision.BLOCK` with `invalid_agent_identity`.
+- `src/sentron/agentguard/approval.py`:
+  - Bound approval scopes capturing agent, tool, operation, target, destination, recipient, purpose, task ID, data classification, risk flags, untrusted context references, and session ID.
+  - Strict bidirectional session validation: Rejects session mismatches, and prevents sessionless requests from being authorized using unrelated supplied session IDs.
+  - Prevents cross-agent authorization: Approval granted to Agent A cannot authorize Agent B.
+  - Safe expiry and single-use consumption.
+- `src/sentron/agentguard/executor.py`:
+  - Absolute fail-closed boundary: Injected handler is only dispatched when policy evaluates to `Decision.ALLOW` or a valid scoped approval is verified and consumed.
+  - Full audit emission across all lifecycle events (`policy_decision`, `approval_required`, `approval_rejected`, `approval_accepted`, `execution_succeeded`, `execution_failed`) preserving `session_id`.
+  - Secret protection: Exception messages from action handlers are not leaked to audit records.
+- `src/sentron/agentguard/audit.py`:
+  - Persistent SQLite audit logging (`SqliteAuditLog`) storing privacy-conscious, redacted event records.
+  - `session_id` persisted in payload and searchable via `search_events(session_id=...)`.
 
 ## Quick usage example
 
@@ -30,30 +42,35 @@ request = ActionRequest(
     tool_name="mock_file_tool",
     operation="read_file",
     target="sample.txt",
+    session_id="session-001",
 )
 policy = PolicyEngine([
     PolicyRule(
         decision=Decision.ALLOW,
+        agent_id="demo-agent",
         tool_name="mock_file_tool",
         operation="read_file",
+        target="sample.txt",
         reason_code="demo_read_allowed",
         explanation="Explicitly permitted mock read.",
     )
 ])
 approvals = ApprovalManager()
 audit = InMemoryAuditLog()
-executor = ControlledExecutor(policy, approvals, lambda action: {"mock": True}, audit)
+executor = ControlledExecutor(policy, approvals, lambda action: {"status": "success"}, audit)
 result = executor.execute(request)
 print(result.status)  # executed
 ```
 
 ## Validation performed
 
-Run from the project root:
+Run from `SENTRON_Developer_Starter`:
 
 ```bash
-python -m pytest -q
+python -m pytest tests -q
 python -m compileall -q src tests
 ```
 
-At the time this patch was prepared, pytest reported **18 passed** and compileall completed successfully. This starter ZIP did not contain a `.git` directory, so Git status/diff could not be inspected in this extracted copy.
+- Total tests passed: **102 passed** (including 54 Dev2 unit tests, 22 Dev1 input risk / sensitive data tests, and 26 system/integration/UI tests).
+- Python syntax compilation: 100% clean (code 0).
+

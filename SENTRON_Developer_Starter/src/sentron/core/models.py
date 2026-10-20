@@ -75,6 +75,7 @@ class AuditEvent:
     explanation: str | None = None
     execution_status: str | None = None
     approval_id: str | None = None
+    session_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

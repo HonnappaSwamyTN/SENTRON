@@ -27,18 +27,18 @@ class ApprovalScope:
     @classmethod
     def from_request(cls, request: ActionRequest) -> "ApprovalScope":
         return cls(
-            agent_id=request.agent_id,
-            tool_name=request.tool_name,
-            operation=request.operation,
-            target=request.target,
-            destination=request.destination,
-            recipient=request.recipient,
-            purpose=request.purpose,
-            task_id=request.task_id,
-            data_classification=request.data_classification,
-            risk_flags=request.risk_flags,
-            untrusted_context_refs=request.untrusted_context_refs,
-            session_id=request.session_id,
+            agent_id=getattr(request, "agent_id", ""),
+            tool_name=getattr(request, "tool_name", ""),
+            operation=getattr(request, "operation", ""),
+            target=getattr(request, "target", None),
+            destination=getattr(request, "destination", None),
+            recipient=getattr(request, "recipient", None),
+            purpose=getattr(request, "purpose", None),
+            task_id=getattr(request, "task_id", None),
+            data_classification=getattr(request, "data_classification", None),
+            risk_flags=tuple(getattr(request, "risk_flags", ()) or ()),
+            untrusted_context_refs=tuple(getattr(request, "untrusted_context_refs", ()) or ()),
+            session_id=getattr(request, "session_id", None),
         )
 
     def matches(self, request: ActionRequest) -> bool:
@@ -70,6 +70,17 @@ class ApprovalManager:
         max_uses: int = 1,
         now: datetime | None = None,
     ) -> ApprovalRecord:
+        if request is None:
+            raise ValueError("request must be provided")
+        agent_id = getattr(request, "agent_id", None)
+        if not agent_id or not isinstance(agent_id, str) or not agent_id.strip():
+            raise ValueError("request must have a valid non-empty agent_id")
+        tool_name = getattr(request, "tool_name", None)
+        if not tool_name or not isinstance(tool_name, str) or not tool_name.strip():
+            raise ValueError("request must have a valid non-empty tool_name")
+        operation = getattr(request, "operation", None)
+        if not operation or not isinstance(operation, str) or not operation.strip():
+            raise ValueError("request must have a valid non-empty operation")
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
         if max_uses <= 0:
@@ -99,6 +110,20 @@ class ApprovalManager:
         session_id: str | None = None,
         now: datetime | None = None,
     ) -> tuple[bool, str]:
+        if not approval_id or not isinstance(approval_id, str) or not approval_id.strip():
+            return False, "approval_not_found"
+        if request is None:
+            return False, "malformed_request"
+        agent_id = getattr(request, "agent_id", None)
+        if not agent_id or not isinstance(agent_id, str) or not agent_id.strip():
+            return False, "invalid_agent_identity"
+        tool_name = getattr(request, "tool_name", None)
+        operation = getattr(request, "operation", None)
+        if not tool_name or not isinstance(tool_name, str) or not tool_name.strip():
+            return False, "malformed_request"
+        if not operation or not isinstance(operation, str) or not operation.strip():
+            return False, "malformed_request"
+
         current_time = now or utc_now()
         if session_id is not None and session_id != request.session_id:
             return False, "approval_session_mismatch"
@@ -112,7 +137,7 @@ class ApprovalManager:
             if current_time >= record.expires_at:
                 del self._records[approval_id]
                 return False, "approval_expired"
-            if record.session_id is not None and record.session_id != effective_session_id:
+            if record.session_id != effective_session_id:
                 return False, "approval_session_mismatch"
             if not record.scope.matches(request):
                 return False, "approval_scope_mismatch"

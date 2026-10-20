@@ -153,6 +153,7 @@ class SqliteAuditLog:
             "explanation": event.explanation,
             "execution_status": event.execution_status,
             "approval_id": event.approval_id,
+            "session_id": getattr(event, "session_id", None),
         }
 
         # Redact secrets from summary and payload
@@ -257,6 +258,7 @@ class SqliteAuditLog:
         subsystem: str | None = "AgentGuard",
         agent_id: str | None = None,
         severity: str | None = None,
+        session_id: str | None = None,
         limit: int = 50,
     ) -> list[StoredAuditEvent]:
         """Search historical audit events by keyword, agent ID, and severity.
@@ -305,6 +307,9 @@ class SqliteAuditLog:
 
         if agent_id is not None:
             results = [r for r in results if r.payload.get("agent_id") == agent_id]
+
+        if session_id is not None:
+            results = [r for r in results if r.payload.get("session_id") == session_id]
 
         return results
 

@@ -49,41 +49,73 @@ class ControlledExecutor:
         approval_id: str | None = None,
         session_id: str | None = None,
     ) -> ExecutionResult:
+        req_session_id = getattr(request, "session_id", None) if request is not None else None
+        req_action_id = getattr(request, "action_id", "unknown_action") if request is not None else "unknown_action"
+        req_agent_id = getattr(request, "agent_id", "unknown_agent") if request is not None else "unknown_agent"
+
         policy_result = self._policy.evaluate(request)
+        if policy_result is None or policy_result.decision not in (Decision.ALLOW, Decision.ASK, Decision.BLOCK):
+            unknown_dec = getattr(policy_result, "decision", None)
+            self._audit.record_event(AuditEvent(
+                event_type="policy_decision",
+                action_id=req_action_id,
+                agent_id=req_agent_id,
+                timestamp=utc_now(),
+                decision=Decision.BLOCK,
+                reason_code="unknown_policy_decision",
+                explanation=f"Execution blocked: unrecognized policy decision {unknown_dec!r}.",
+                session_id=req_session_id,
+            ))
+            return ExecutionResult(
+                status="blocked",
+                decision=Decision.BLOCK,
+                reason_code="unknown_policy_decision",
+                explanation=f"Execution blocked: unrecognized policy decision {unknown_dec!r}.",
+                action_id=req_action_id,
+            )
+
         self._audit.record_event(AuditEvent(
             event_type="policy_decision",
-            action_id=request.action_id,
-            agent_id=request.agent_id,
+            action_id=req_action_id,
+            agent_id=req_agent_id,
             timestamp=utc_now(),
             decision=policy_result.decision,
             reason_code=policy_result.reason_code,
             explanation=policy_result.explanation,
+            session_id=req_session_id,
         ))
 
         if policy_result.decision == Decision.BLOCK:
             return ExecutionResult(
-                status="blocked", decision=Decision.BLOCK,
+                status="blocked",
+                decision=Decision.BLOCK,
                 reason_code=policy_result.reason_code,
-                explanation=policy_result.explanation, action_id=request.action_id,
+                explanation=policy_result.explanation,
+                action_id=req_action_id,
             )
 
         used_approval_id: str | None = None
         if policy_result.decision == Decision.ASK:
             if approval_id is None:
                 self._audit.record_event(AuditEvent(
-                    event_type="approval_required", action_id=request.action_id,
-                    agent_id=request.agent_id, decision=Decision.ASK,
+                    event_type="approval_required",
+                    action_id=req_action_id,
+                    agent_id=req_agent_id,
+                    decision=Decision.ASK,
                     reason_code=policy_result.reason_code,
                     explanation="Execution withheld until the user approves this scoped action.",
+                    session_id=req_session_id,
                 ))
                 return ExecutionResult(
-                    status="approval_required", decision=Decision.ASK,
+                    status="approval_required",
+                    decision=Decision.ASK,
                     reason_code=policy_result.reason_code,
                     explanation="Execution withheld until the user approves this scoped action.",
-                    action_id=request.action_id,
+                    action_id=req_action_id,
                 )
-            effective_session_id = session_id if session_id is not None else request.session_id
-            if session_id is not None and session_id != request.session_id:
+
+            effective_session_id = session_id if session_id is not None else req_session_id
+            if session_id is not None and session_id != req_session_id:
                 valid, approval_reason = False, "approval_session_mismatch"
             else:
                 valid, approval_reason = self._approvals.validate_and_consume(
@@ -91,53 +123,84 @@ class ControlledExecutor:
                 )
             if not valid:
                 self._audit.record_event(AuditEvent(
-                    event_type="approval_rejected", action_id=request.action_id,
-                    agent_id=request.agent_id, decision=Decision.ASK,
+                    event_type="approval_rejected",
+                    action_id=req_action_id,
+                    agent_id=req_agent_id,
+                    decision=Decision.ASK,
                     reason_code=approval_reason,
                     explanation="The supplied approval is invalid, expired, consumed, or outside its scope.",
                     approval_id=approval_id,
+                    session_id=req_session_id,
                 ))
                 return ExecutionResult(
-                    status="approval_required", decision=Decision.ASK,
+                    status="approval_required",
+                    decision=Decision.ASK,
                     reason_code=approval_reason,
                     explanation="Approval did not authorize this exact action; obtain fresh approval.",
-                    action_id=request.action_id, approval_id=approval_id,
+                    action_id=req_action_id,
+                    approval_id=approval_id,
                 )
             used_approval_id = approval_id
             self._audit.record_event(AuditEvent(
-                event_type="approval_accepted", action_id=request.action_id,
-                agent_id=request.agent_id, decision=Decision.ASK,
+                event_type="approval_accepted",
+                action_id=req_action_id,
+                agent_id=req_agent_id,
+                decision=Decision.ASK,
                 reason_code="approval_valid",
                 explanation="A matching scoped approval was accepted.",
                 approval_id=approval_id,
+                session_id=req_session_id,
             ))
+
+        # Absolute fail-closed boundary: only ALLOW or validly approved ASK may reach handler
+        if policy_result.decision != Decision.ALLOW and used_approval_id is None:
+            return ExecutionResult(
+                status="blocked",
+                decision=Decision.BLOCK,
+                reason_code="unauthorized_execution",
+                explanation="Execution blocked: action has not received authorized approval.",
+                action_id=req_action_id,
+            )
 
         try:
             output = self._handler(request)
         except Exception as exc:  # Avoid logging exception messages that may contain secrets.
             reason_code = f"execution_error_{type(exc).__name__}"
             self._audit.record_event(AuditEvent(
-                event_type="execution_failed", action_id=request.action_id,
-                agent_id=request.agent_id, decision=policy_result.decision,
-                reason_code=reason_code, execution_status="failed",
+                event_type="execution_failed",
+                action_id=req_action_id,
+                agent_id=req_agent_id,
+                decision=policy_result.decision,
+                reason_code=reason_code,
+                execution_status="failed",
                 approval_id=used_approval_id,
+                session_id=req_session_id,
             ))
             return ExecutionResult(
-                status="failed", decision=policy_result.decision,
+                status="failed",
+                decision=policy_result.decision,
                 reason_code="execution_failed",
                 explanation="The action handler failed; details were not written to the audit log.",
-                action_id=request.action_id, approval_id=used_approval_id,
+                action_id=req_action_id,
+                approval_id=used_approval_id,
             )
 
         self._audit.record_event(AuditEvent(
-            event_type="execution_succeeded", action_id=request.action_id,
-            agent_id=request.agent_id, decision=policy_result.decision,
-            reason_code="execution_succeeded", execution_status="succeeded",
+            event_type="execution_succeeded",
+            action_id=req_action_id,
+            agent_id=req_agent_id,
+            decision=policy_result.decision,
+            reason_code="execution_succeeded",
+            execution_status="succeeded",
             approval_id=used_approval_id,
+            session_id=req_session_id,
         ))
         return ExecutionResult(
-            status="executed", decision=policy_result.decision,
+            status="executed",
+            decision=policy_result.decision,
             reason_code="execution_succeeded",
             explanation="The action handler completed after authorization.",
-            action_id=request.action_id, approval_id=used_approval_id, output=output,
+            action_id=req_action_id,
+            approval_id=used_approval_id,
+            output=output,
         )
