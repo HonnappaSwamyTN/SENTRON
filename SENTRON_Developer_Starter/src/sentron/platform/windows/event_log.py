@@ -30,21 +30,23 @@ class WindowsEventLogAdapter:
         evidence_list: list[WindowsEvidence] = []
 
         # Target event IDs:
-        # 1000: Application Error (Crash)
-        # 1002: Application Hang
-        # 6008: Unexpected Shutdown
+        # 1000: Application Error (Crash) - Application log
+        # 1002: Application Hang - Application log
+        # 6008: Unexpected Shutdown - System log
         try:
-            # Use PowerShell Get-WinEvent with safety try/catch and timeout
+            # Query Application (1000, 1002) and System (6008) event channels safely
             ps_script = (
-                f"$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ID=1000,1002}} "
-                f"-MaxEvents {limit} -ErrorAction SilentlyContinue; "
+                f"$e1 = Get-WinEvent -FilterHashtable @{{LogName='Application'; ID=1000,1002}} -MaxEvents {limit} -ErrorAction SilentlyContinue; "
+                f"$e2 = Get-WinEvent -FilterHashtable @{{LogName='System'; ID=6008}} -MaxEvents {limit} -ErrorAction SilentlyContinue; "
+                f"$events = @($e1) + @($e2) | Where-Object {{ $_ -ne $null }} | Sort-Object TimeCreated -Descending | Select-Object -First {limit}; "
                 "foreach ($e in $events) { "
                 "$time = $e.TimeCreated.ToString('o'); "
                 "$id = $e.Id; "
+                "$log = $e.LogName; "
                 "$src = $e.ProviderName; "
                 "$msg = $e.Message -replace \"[\r\n]+\", ' '; "
                 "if ($msg.Length -gt 150) { $msg = $msg.Substring(0, 150) + '...' }; "
-                "Write-Output \"$id|$src|$time|$msg\" "
+                "Write-Output \"$id|$log|$src|$time|$msg\" "
                 "}"
             )
             result = subprocess.run(
@@ -56,8 +58,24 @@ class WindowsEventLogAdapter:
             )
             if result.returncode == 0 and result.stdout.strip():
                 for line in result.stdout.strip().splitlines():
-                    parts = line.split("|", 3)
-                    if len(parts) == 4:
+                    parts = line.split("|", 4)
+                    if len(parts) == 5:
+                        ev_id_str, log_chan, provider, ev_time, desc = parts
+                        try:
+                            ev_id = int(ev_id_str.strip())
+                        except ValueError:
+                            ev_id = 1000
+                        evidence_list.append(
+                            WindowsEvidence(
+                                event_id=ev_id,
+                                log_channel=log_chan.strip(),
+                                source=provider.strip(),
+                                event_time=ev_time.strip(),
+                                description=desc.strip(),
+                            )
+                        )
+                    elif len(parts) == 4:
+                        # Backward compatibility if 4-part line returned
                         ev_id_str, provider, ev_time, desc = parts
                         try:
                             ev_id = int(ev_id_str.strip())

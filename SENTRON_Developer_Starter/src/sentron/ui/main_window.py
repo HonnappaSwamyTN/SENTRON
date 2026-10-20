@@ -25,6 +25,7 @@ from sentron.agentguard.executor import ControlledExecutor
 from sentron.agentguard.policy import PolicyEngine
 from sentron.core.models import RiskAlert, SystemSnapshot, UnifiedEvent
 from sentron.core.storage import EventStore
+from sentron.crashguard.evidence import persist_windows_evidence
 from sentron.crashguard.worker import MonitoringWorker
 from sentron.ui.agentguard_panel import AgentGuardPanel
 from sentron.ui.alert_popup import CrashGuardAlertPopup
@@ -39,6 +40,8 @@ class SentronMainWindow(QMainWindow):
 
     snapshot_received = Signal(object)
     alert_received = Signal(object, list)
+    evidence_received = Signal(list, list)
+
 
     def __init__(
         self,
@@ -174,12 +177,32 @@ class SentronMainWindow(QMainWindow):
         # Route background worker updates to main Qt thread via signals
         self.snapshot_received.connect(self._on_snapshot_received)
         self.alert_received.connect(self._on_alert_received)
+        self.evidence_received.connect(self._on_evidence_received)
 
         self.worker.on_snapshot = lambda snap: self.snapshot_received.emit(snap)
         self.worker.on_alert = lambda alert, recs: self.alert_received.emit(alert, recs)
+        self.worker.on_evidence = lambda evs, warns: self.evidence_received.emit(evs, warns)
 
         # Connect AgentGuard audit events to refresh timeline
         self.agentguard_panel.event_recorded.connect(self._on_agentguard_event)
+
+    @Slot(list, list)
+    def _on_evidence_received(self, evidence_list: list, warnings: list) -> None:
+        self.crashguard_panel.update_evidence(evidence_list, warnings)
+
+        # Persist newly captured evidence into unified SQLite event store (AC-16)
+        try:
+            newly_stored = persist_windows_evidence(
+                store=self.event_store,
+                evidence_list=evidence_list,
+                collector=self.worker.evidence_collector,
+                seen_ids=self.worker._seen_evidence_ids,
+            )
+            if newly_stored:
+                self.timeline_panel.refresh_timeline()
+        except Exception:
+            pass
+
 
     @Slot(object)
     def _on_snapshot_received(self, snapshot: SystemSnapshot) -> None:

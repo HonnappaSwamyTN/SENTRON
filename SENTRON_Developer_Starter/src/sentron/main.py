@@ -71,9 +71,10 @@ def create_application(db_path: str | Path | None = None) -> tuple[QApplication,
         audit_sink=audit_log,
     )
 
-    # CrashGuard background worker
-    worker = MonitoringWorker(interval_seconds=2.0, buffer_capacity=60)
+    # CrashGuard background worker with unified event store
+    worker = MonitoringWorker(interval_seconds=2.0, buffer_capacity=60, event_store=event_store)
     worker.start()
+
 
     window = SentronMainWindow(
         executor=controlled_executor,

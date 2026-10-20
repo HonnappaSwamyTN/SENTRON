@@ -10,12 +10,21 @@ from __future__ import annotations
 import collections
 import threading
 import time
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
-from sentron.core.models import RecoveryRecommendation, RiskAlert, SystemSnapshot
+from sentron.core.models import (
+    RecoveryRecommendation,
+    RiskAlert,
+    SystemSnapshot,
+    WindowsEvidence,
+)
+from sentron.crashguard.evidence import WindowsEvidenceCollector, persist_windows_evidence
 from sentron.crashguard.metrics import MetricsCollector
 from sentron.crashguard.recovery import SafeRecoveryAdvisor
 from sentron.crashguard.risk import SustainedRiskDetector
+
+if TYPE_CHECKING:
+    from sentron.core.storage import EventStore
 
 
 class MonitoringWorker:
@@ -28,17 +37,33 @@ class MonitoringWorker:
         collector: MetricsCollector | None = None,
         detector: SustainedRiskDetector | None = None,
         advisor: SafeRecoveryAdvisor | None = None,
+        evidence_collector: WindowsEvidenceCollector | None = None,
+        event_store: EventStore | None = None,
+        evidence_interval_seconds: float = 60.0,
         on_snapshot: Callable[[SystemSnapshot], None] | None = None,
         on_alert: Callable[[RiskAlert, list[RecoveryRecommendation]], None] | None = None,
+        on_evidence: Callable[[list[WindowsEvidence], list[str]], None] | None = None,
     ) -> None:
         self.interval_seconds = interval_seconds
         self.buffer_capacity = buffer_capacity
         self.collector = collector or MetricsCollector()
         self.detector = detector or SustainedRiskDetector(sustained_duration_seconds=10.0, cooldown_seconds=30.0)
         self.advisor = advisor or SafeRecoveryAdvisor()
+        self.evidence_collector = evidence_collector or WindowsEvidenceCollector()
+        self.event_store = event_store
+        self.evidence_interval_seconds = evidence_interval_seconds
 
         self.on_snapshot = on_snapshot
         self.on_alert = on_alert
+        self.on_evidence = on_evidence
+
+        # Evidence collection state and threading
+        self._last_evidence_time: float = 0.0
+        self._evidence_thread: threading.Thread | None = None
+        self._evidence_lock = threading.Lock()
+        self._latest_evidence: list[WindowsEvidence] = []
+        self._latest_evidence_warnings: list[str] = []
+        self._seen_evidence_ids: set[str] = set()
 
         # Bounded ring buffer for memory safety
         self.snapshot_buffer: collections.deque[SystemSnapshot] = collections.deque(maxlen=buffer_capacity)
@@ -68,11 +93,20 @@ class MonitoringWorker:
 
     def stop(self, timeout: float = 2.0) -> None:
         """Cleanly stop worker thread within timeout."""
+        t_start = time.time()
         self._stop_event.set()
         self._wake_event.set()
         self._is_active = False
+
         if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=timeout)
+            elapsed = time.time() - t_start
+            remaining = max(0.05, timeout - elapsed)
+            self._thread.join(timeout=remaining)
+
+        if self._evidence_thread is not None and self._evidence_thread.is_alive():
+            elapsed = time.time() - t_start
+            remaining = max(0.05, timeout - elapsed)
+            self._evidence_thread.join(timeout=remaining)
 
     def get_latest_snapshot(self) -> SystemSnapshot | None:
         """Return the most recent snapshot in buffer."""
@@ -124,6 +158,85 @@ class MonitoringWorker:
         self.detector.reset_metric("DiskFreeGB")
         self._wake_event.set()
 
+    def trigger_evidence_collection_async(self) -> None:
+        """Trigger non-blocking background collection of Windows crash evidence."""
+        with self._evidence_lock:
+            if self._evidence_thread is not None and self._evidence_thread.is_alive():
+                return
+            self._last_evidence_time = time.time()
+            self._evidence_thread = threading.Thread(
+                target=self._run_evidence_collection,
+                name="SentronCrashGuardEvidenceCollector",
+                daemon=True,
+            )
+            self._evidence_thread.start()
+
+    def _run_evidence_collection(self) -> tuple[list[WindowsEvidence], list[str]]:
+        """Executed on dedicated background thread to keep telemetry non-blocking."""
+        try:
+            records, warnings = self.evidence_collector.collect_evidence(limit=5)
+        except Exception as exc:
+            records, warnings = [], [f"windows_evidence_error:{exc}"]
+
+        with self._evidence_lock:
+            self._latest_evidence = list(records)
+            self._latest_evidence_warnings = list(warnings)
+
+        if self.event_store is not None and records:
+            try:
+                persist_windows_evidence(
+                    store=self.event_store,
+                    evidence_list=records,
+                    collector=self.evidence_collector,
+                    seen_ids=self._seen_evidence_ids,
+                )
+            except Exception:
+                pass
+
+        if self.on_evidence:
+            try:
+                self.on_evidence(records, warnings)
+            except Exception:
+                pass
+
+        return records, warnings
+
+    def poll_evidence(self, limit: int = 5) -> tuple[list[WindowsEvidence], list[str]]:
+        """Synchronously collect evidence, persist with deduplication, and notify listener."""
+        self._last_evidence_time = time.time()
+        try:
+            records, warnings = self.evidence_collector.collect_evidence(limit=limit)
+        except Exception as exc:
+            records, warnings = [], [f"windows_evidence_error:{exc}"]
+
+        with self._evidence_lock:
+            self._latest_evidence = list(records)
+            self._latest_evidence_warnings = list(warnings)
+
+        if self.event_store is not None and records:
+            try:
+                persist_windows_evidence(
+                    store=self.event_store,
+                    evidence_list=records,
+                    collector=self.evidence_collector,
+                    seen_ids=self._seen_evidence_ids,
+                )
+            except Exception:
+                pass
+
+        if self.on_evidence:
+            try:
+                self.on_evidence(records, warnings)
+            except Exception:
+                pass
+
+        return records, warnings
+
+    def get_latest_evidence(self) -> tuple[list[WindowsEvidence], list[str]]:
+        """Return the most recently collected evidence records and warnings."""
+        with self._evidence_lock:
+            return list(self._latest_evidence), list(self._latest_evidence_warnings)
+
     def _sample_once(self) -> SystemSnapshot:
         """Collect one snapshot, either synthetic if injected or authentic."""
         if self._synthetic_override is not None:
@@ -148,6 +261,15 @@ class MonitoringWorker:
                     self.on_alert(alert, recommendations)
                 except Exception:
                     pass
+
+        # Trigger evidence collection on sustained-risk alert or conservative interval (30-60s)
+        now = time.time()
+        has_risk_alert = len(alerts) > 0
+        interval_due = (
+            self._last_evidence_time == 0.0 or (now - self._last_evidence_time >= self.evidence_interval_seconds)
+        )
+        if has_risk_alert or interval_due:
+            self.trigger_evidence_collection_async()
 
         if self.on_snapshot:
             try:

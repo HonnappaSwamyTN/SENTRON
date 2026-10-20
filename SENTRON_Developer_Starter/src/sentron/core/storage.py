@@ -58,8 +58,23 @@ class EventStore:
             except sqlite3.Error as exc:
                 raise StorageError(f"Failed to initialize storage schema: {exc}") from exc
 
-    def record_unified_event(self, event: UnifiedEvent) -> StoredAuditEvent:
-        """Record a UnifiedEvent into the events table with secret redaction."""
+    def has_event(self, event_id: str) -> bool:
+        """Check if an event with the given event_id exists in storage."""
+        with self._lock:
+            try:
+                cursor = self._conn.execute("SELECT 1 FROM events WHERE event_id = ? LIMIT 1", (event_id,))
+                return cursor.fetchone() is not None
+            except sqlite3.Error as exc:
+                raise StorageError(f"Failed to query event existence: {exc}") from exc
+
+    def record_unified_event(self, event: UnifiedEvent, ignore_duplicate: bool = False) -> StoredAuditEvent | None:
+        """Record a UnifiedEvent into the events table with secret redaction.
+
+        If ignore_duplicate is True and the event already exists, returns None without raising an error.
+        """
+        if ignore_duplicate and self.has_event(event.event_id):
+            return None
+
         sanitized_summary, summary_redacted = redact_sensitive_text(event.summary)
         summary_final = sanitized_summary or event.summary
 
@@ -88,6 +103,10 @@ class EventStore:
                     ),
                 )
                 self._conn.commit()
+            except sqlite3.IntegrityError as exc:
+                if ignore_duplicate:
+                    return None
+                raise StorageError(f"Failed to persist event '{event.event_id}': {exc}") from exc
             except sqlite3.Error as exc:
                 raise StorageError(f"Failed to persist event '{event.event_id}': {exc}") from exc
 

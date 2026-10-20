@@ -17,7 +17,12 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 
-from sentron.core.models import RecoveryRecommendation, RiskAlert, SystemSnapshot
+from sentron.core.models import (
+    RecoveryRecommendation,
+    RiskAlert,
+    SystemSnapshot,
+    WindowsEvidence,
+)
 from sentron.crashguard.worker import MonitoringWorker
 from sentron.ui.chart_widget import ResourceChartWidget
 
@@ -35,8 +40,11 @@ class CrashGuardPanel(QWidget):
         super().__init__(parent)
         self.worker = worker
         self._current_alert: RiskAlert | None = None
+        self._current_evidence: list[WindowsEvidence] = []
+        self._evidence_warnings: list[str] = []
 
         self._init_ui()
+
 
     def _init_ui(self) -> None:
         main_layout = QVBoxLayout(self)
@@ -113,8 +121,39 @@ class CrashGuardPanel(QWidget):
         chart_layout.addWidget(self.chart_widget)
         main_layout.addWidget(chart_group)
 
+        # Windows Crash & Hang Evidence (Diagnostic Log)
+        evidence_group = QGroupBox("Host Crash & Diagnostic Evidence (Windows Event Log)")
+        evidence_layout = QVBoxLayout(evidence_group)
+        evidence_layout.setSpacing(6)
+
+        evidence_header = QHBoxLayout()
+        self.lbl_evidence_status = QLabel("Cadence: 60s & on sustained alerts • Waiting for first scan...")
+        self.lbl_evidence_status.setStyleSheet("color: #8b949e; font-size: 11px;")
+
+        self.btn_scan_evidence = QPushButton("Scan Evidence Now")
+        self.btn_scan_evidence.setStyleSheet("background-color: #21262d; padding: 4px 10px; font-size: 11px;")
+        self.btn_scan_evidence.clicked.connect(self._on_scan_evidence_clicked)
+
+        evidence_header.addWidget(self.lbl_evidence_status)
+        evidence_header.addStretch()
+        evidence_header.addWidget(self.btn_scan_evidence)
+        evidence_layout.addLayout(evidence_header)
+
+        self.evidence_table = QTableWidget(0, 4)
+        self.evidence_table.setHorizontalHeaderLabels(["Time", "Event ID", "Source", "Explanation"])
+        self.evidence_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.evidence_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.evidence_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.evidence_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.evidence_table.setMinimumHeight(110)
+        self.evidence_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        evidence_layout.addWidget(self.evidence_table)
+
+        main_layout.addWidget(evidence_group)
+
         # Bottom section: Top Processes Table & Synthetic Demo Controls
         bottom_row = QHBoxLayout()
+
         bottom_row.setSpacing(12)
 
         # Top processes table
@@ -281,3 +320,66 @@ class CrashGuardPanel(QWidget):
                 win.dismiss_simulated_alerts()
             except Exception:
                 pass
+
+    @Slot(list, list)
+    def update_evidence(self, evidence_records: list[WindowsEvidence], warnings: list[str] = ()) -> None:
+        """Update the evidence table with captured diagnostic records and fallback warnings."""
+        self._current_evidence = list(evidence_records)
+        self._evidence_warnings = list(warnings)
+
+        self.evidence_table.setRowCount(len(evidence_records))
+        for r_idx, ev in enumerate(evidence_records):
+            # Timestamp display
+            try:
+                t_part = ev.event_time.split("T")[1].split(".")[0] if "T" in ev.event_time else ev.event_time
+            except Exception:
+                t_part = ev.event_time
+
+            item_time = QTableWidgetItem(t_part)
+            item_time.setToolTip(ev.event_time)
+
+            item_id = QTableWidgetItem(str(ev.event_id))
+            item_id.setToolTip(f"Event ID: {ev.event_id} ({ev.log_channel} Channel)")
+
+            item_source = QTableWidgetItem(ev.source)
+            item_source.setToolTip(ev.source)
+
+            # Separate confirmed observation from suspected cause (AC-11)
+            confirmed, inferred = self.worker.evidence_collector.format_diagnostic_statement(ev)
+            concise_explanation = f"{confirmed} — {inferred}"
+            item_exp = QTableWidgetItem(concise_explanation)
+            item_exp.setToolTip(
+                f"{confirmed}\n\n{inferred}\n\nLog Channel: {ev.log_channel}\nRaw Details: {ev.description}"
+            )
+            item_exp.setData(Qt.UserRole, ev)
+
+            self.evidence_table.setItem(r_idx, 0, item_time)
+            self.evidence_table.setItem(r_idx, 1, item_id)
+            self.evidence_table.setItem(r_idx, 2, item_source)
+            self.evidence_table.setItem(r_idx, 3, item_exp)
+
+        # Update evidence status label
+        if warnings:
+            warn_msg = ", ".join(warnings)
+            self.lbl_evidence_status.setText(f"Status: Fallback active ({warn_msg})")
+            self.lbl_evidence_status.setStyleSheet("color: #d29922; font-size: 11px;")
+        elif not evidence_records:
+            self.lbl_evidence_status.setText("Status: No crash or hang events recorded in Windows logs.")
+            self.lbl_evidence_status.setStyleSheet("color: #8b949e; font-size: 11px;")
+        else:
+            self.lbl_evidence_status.setText(
+                f"Status: {len(evidence_records)} diagnostic record(s) captured from Windows Event Log"
+            )
+            self.lbl_evidence_status.setStyleSheet("color: #3fb950; font-size: 11px;")
+
+    def _on_scan_evidence_clicked(self) -> None:
+        """Trigger immediate non-blocking scan on user request."""
+        self.worker.trigger_evidence_collection_async()
+
+    def get_evidence_count(self) -> int:
+        return len(self._current_evidence)
+
+    def get_evidence_item(self, row: int) -> WindowsEvidence | None:
+        if 0 <= row < len(self._current_evidence):
+            return self._current_evidence[row]
+        return None
