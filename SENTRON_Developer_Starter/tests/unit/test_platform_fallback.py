@@ -47,3 +47,45 @@ def test_timeout_fallback():
         evidence, warnings = adapter.query_recent_diagnostic_events()
         assert evidence == []
         assert "windows_event_log_timeout" in warnings
+
+
+@pytest.mark.unit
+def test_event_log_adapter_subprocess_permission_error():
+    """AC-14: WindowsEventLogAdapter handles subprocess PermissionError gracefully."""
+    adapter = WindowsEventLogAdapter()
+    adapter.is_windows = True
+
+    with patch("subprocess.run", side_effect=PermissionError("WinError 5: Access is denied")):
+        evidence, warnings = adapter.query_recent_diagnostic_events()
+        assert evidence == []
+        assert "windows_event_log_access_denied" in warnings
+
+
+@pytest.mark.unit
+def test_event_log_adapter_powershell_access_denied_stderr():
+    """AC-14: WindowsEventLogAdapter captures PowerShell UnauthorizedAccessException in stderr."""
+    adapter = WindowsEventLogAdapter()
+    adapter.is_windows = True
+
+    mock_res = MagicMock()
+    mock_res.returncode = 1
+    mock_res.stderr = "Get-WinEvent : Access is denied. System.UnauthorizedAccessException"
+    mock_res.stdout = ""
+
+    with patch("subprocess.run", return_value=mock_res):
+        evidence, warnings = adapter.query_recent_diagnostic_events()
+        assert evidence == []
+        assert "windows_event_log_access_denied" in warnings
+
+
+@pytest.mark.unit
+def test_evidence_collector_direct_permission_error():
+    """AC-14: WindowsEvidenceCollector directly handles PermissionError from underlying adapter."""
+    mock_adapter = MagicMock()
+    mock_adapter.query_recent_diagnostic_events.side_effect = PermissionError("Restricted token")
+
+    collector = WindowsEvidenceCollector(adapter=mock_adapter)
+    records, warnings = collector.collect_evidence()
+    assert records == []
+    assert "windows_event_log_access_denied" in warnings
+

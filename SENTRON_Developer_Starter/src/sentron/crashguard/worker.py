@@ -18,12 +18,18 @@ from sentron.core.models import (
     SystemSnapshot,
     WindowsEvidence,
 )
-from sentron.crashguard.evidence import WindowsEvidenceCollector, persist_windows_evidence
+from sentron.crashguard.evidence import (
+    WindowsEvidenceCollector,
+    load_seen_ids_from_json,
+    persist_windows_evidence,
+    save_seen_ids_to_json,
+)
 from sentron.crashguard.metrics import MetricsCollector
 from sentron.crashguard.recovery import SafeRecoveryAdvisor
 from sentron.crashguard.risk import SustainedRiskDetector
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from sentron.core.storage import EventStore
 
 
@@ -40,6 +46,7 @@ class MonitoringWorker:
         evidence_collector: WindowsEvidenceCollector | None = None,
         event_store: EventStore | None = None,
         evidence_interval_seconds: float = 60.0,
+        state_file_path: str | Path | None = None,
         on_snapshot: Callable[[SystemSnapshot], None] | None = None,
         on_alert: Callable[[RiskAlert, list[RecoveryRecommendation]], None] | None = None,
         on_evidence: Callable[[list[WindowsEvidence], list[str]], None] | None = None,
@@ -52,6 +59,7 @@ class MonitoringWorker:
         self.evidence_collector = evidence_collector or WindowsEvidenceCollector()
         self.event_store = event_store
         self.evidence_interval_seconds = evidence_interval_seconds
+        self.state_file_path = state_file_path
 
         self.on_snapshot = on_snapshot
         self.on_alert = on_alert
@@ -63,7 +71,9 @@ class MonitoringWorker:
         self._evidence_lock = threading.Lock()
         self._latest_evidence: list[WindowsEvidence] = []
         self._latest_evidence_warnings: list[str] = []
-        self._seen_evidence_ids: set[str] = set()
+        self._seen_evidence_ids: set[str] = (
+            load_seen_ids_from_json(state_file_path) if state_file_path else set()
+        )
 
         # Bounded ring buffer for memory safety
         self.snapshot_buffer: collections.deque[SystemSnapshot] = collections.deque(maxlen=buffer_capacity)
@@ -98,15 +108,24 @@ class MonitoringWorker:
         self._wake_event.set()
         self._is_active = False
 
+        # Budget join timeouts so total elapsed time never exceeds the given timeout
+        budget = max(0.01, timeout - 0.05)
+
         if self._thread is not None and self._thread.is_alive():
             elapsed = time.time() - t_start
-            remaining = max(0.05, timeout - elapsed)
-            self._thread.join(timeout=remaining)
+            remaining = budget - elapsed
+            if remaining > 0.005:
+                self._thread.join(timeout=remaining)
 
         if self._evidence_thread is not None and self._evidence_thread.is_alive():
             elapsed = time.time() - t_start
-            remaining = max(0.05, timeout - elapsed)
-            self._evidence_thread.join(timeout=remaining)
+            remaining = budget - elapsed
+            if remaining > 0.005:
+                self._evidence_thread.join(timeout=remaining)
+
+        if self.state_file_path and self._seen_evidence_ids:
+            save_seen_ids_to_json(self._seen_evidence_ids, self.state_file_path)
+
 
     def get_latest_snapshot(self) -> SystemSnapshot | None:
         """Return the most recent snapshot in buffer."""
@@ -189,6 +208,8 @@ class MonitoringWorker:
 
     def _run_evidence_collection(self) -> tuple[list[WindowsEvidence], list[str]]:
         """Executed on dedicated background thread to keep telemetry non-blocking."""
+        if self._stop_event.is_set():
+            return [], []
         try:
             records, warnings = self.evidence_collector.collect_evidence(limit=5)
         except Exception as exc:
@@ -205,6 +226,7 @@ class MonitoringWorker:
                     evidence_list=records,
                     collector=self.evidence_collector,
                     seen_ids=self._seen_evidence_ids,
+                    state_file_path=self.state_file_path,
                 )
             except Exception:
                 pass
@@ -236,6 +258,7 @@ class MonitoringWorker:
                     evidence_list=records,
                     collector=self.evidence_collector,
                     seen_ids=self._seen_evidence_ids,
+                    state_file_path=self.state_file_path,
                 )
             except Exception:
                 pass
@@ -243,6 +266,7 @@ class MonitoringWorker:
         if self.on_evidence:
             try:
                 self.on_evidence(records, warnings)
+
             except Exception:
                 pass
 

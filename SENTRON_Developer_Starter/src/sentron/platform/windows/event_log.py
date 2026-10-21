@@ -29,15 +29,19 @@ class WindowsEventLogAdapter:
         unavailable: list[str] = []
         evidence_list: list[WindowsEvidence] = []
 
-        # Target event IDs:
+        # Target event IDs (Extended Coverage):
         # 1000: Application Error (Crash) - Application log
-        # 1002: Application Hang - Application log
+        # 1001: Windows Error Reporting (WER Fault Report) - Application log
+        # 1002: Application Hang (Frozen UI) - Application log
         # 6008: Unexpected Shutdown - System log
+        # 41: Kernel-Power (Abrupt shutdown / power loss) - System log
+        # 1074: System Shutdown/Restart Initiated - System log
+        # 219: Kernel-PnP (Driver/Hardware failure) - System log
         try:
-            # Query Application (1000, 1002) and System (6008) event channels safely
+            # Query Application (1000, 1001, 1002) and System (6008, 41, 1074, 219) event channels safely
             ps_script = (
-                f"$e1 = Get-WinEvent -FilterHashtable @{{LogName='Application'; ID=1000,1002}} -MaxEvents {limit} -ErrorAction SilentlyContinue; "
-                f"$e2 = Get-WinEvent -FilterHashtable @{{LogName='System'; ID=6008}} -MaxEvents {limit} -ErrorAction SilentlyContinue; "
+                f"$e1 = Get-WinEvent -FilterHashtable @{{LogName='Application'; ID=1000,1001,1002}} -MaxEvents {limit} -ErrorAction SilentlyContinue; "
+                f"$e2 = Get-WinEvent -FilterHashtable @{{LogName='System'; ID=6008,41,1074,219}} -MaxEvents {limit} -ErrorAction SilentlyContinue; "
                 f"$events = @($e1) + @($e2) | Where-Object {{ $_ -ne $null }} | Sort-Object TimeCreated -Descending | Select-Object -First {limit}; "
                 "foreach ($e in $events) { "
                 "$time = $e.TimeCreated.ToString('o'); "
@@ -53,10 +57,16 @@ class WindowsEventLogAdapter:
                 ["powershell", "-NoProfile", "-Command", ps_script],
                 capture_output=True,
                 text=True,
-                timeout=3,
+                timeout=2,
                 check=False,
             )
-            if result.returncode == 0 and result.stdout.strip():
+            if result.returncode != 0 and result.stderr:
+                err_lower = result.stderr.lower()
+                if "access is denied" in err_lower or "unauthorizedaccessexception" in err_lower:
+                    unavailable.append("windows_event_log_access_denied")
+                else:
+                    unavailable.append("windows_event_log_unavailable")
+            elif result.returncode == 0 and result.stdout.strip():
                 for line in result.stdout.strip().splitlines():
                     parts = line.split("|", 4)
                     if len(parts) == 5:

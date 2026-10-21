@@ -10,8 +10,9 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from datetime import datetime
-from typing import TYPE_CHECKING
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING, Iterable
 
 from sentron.core.models import UnifiedEvent, WindowsEvidence
 from sentron.platform.windows.event_log import WindowsEventLogAdapter
@@ -45,8 +46,12 @@ class WindowsEvidenceCollector:
         """
         event_names = {
             1000: "Application Error (Crash)",
-            1002: "Application Hang (Frozen UI)",
+            1001: "Windows Error Reporting (WER Crash / Fault Dump)",
+            1002: "Application Hang (Frozen UI / Thread Deadlock)",
             6008: "Unexpected System Shutdown",
+            41: "Kernel-Power (Abrupt System Reboot / Power Loss)",
+            1074: "System Shutdown / Restart Initiated",
+            219: "Kernel-PnP (Driver Device Load Failure)",
         }
         event_desc = event_names.get(evidence.event_id, f"Event ID {evidence.event_id}")
         confirmed = (
@@ -58,15 +63,40 @@ class WindowsEvidenceCollector:
                 "Suspected: The system rebooted or shut down abruptly without completing standard "
                 "shutdown sequences (e.g., power loss, kernel panic, or forced hard reset)."
             )
+        elif evidence.event_id == 41:
+            inferred = (
+                "Suspected: The system rebooted without cleanly shutting down first (potential power cut, "
+                "thermal shutdown, or kernel bugcheck)."
+            )
         elif evidence.event_id == 1002:
             inferred = (
                 f"Suspected: The process associated with '{evidence.source}' stopped interacting "
                 "with Windows (window message pump unresponsive or thread deadlock)."
             )
-        else:
+        elif evidence.event_id == 1001:
+            inferred = (
+                f"Suspected: Windows Error Reporting captured diagnostic metadata following a fault "
+                f"or crash in '{evidence.source}'."
+            )
+        elif evidence.event_id == 1074:
+            inferred = (
+                f"Suspected: An orderly OS shutdown or restart was initiated by '{evidence.source}' "
+                "(e.g., Windows Update, maintenance task, or manual user action)."
+            )
+        elif evidence.event_id == 219:
+            inferred = (
+                f"Suspected: The device driver for '{evidence.source}' failed to load or initialize "
+                "during system hardware enumeration."
+            )
+        elif evidence.event_id == 1000:
             inferred = (
                 f"Suspected: The process associated with '{evidence.source}' may have experienced "
-                "an unhandled exception, resource deadlock, or sudden termination."
+                "an unhandled runtime exception, memory access violation, or sudden termination."
+            )
+        else:
+            inferred = (
+                f"Suspected: Diagnostic condition recorded in {evidence.log_channel} log "
+                f"by provider '{evidence.source}'."
             )
         return confirmed, inferred
 
@@ -91,12 +121,12 @@ def make_evidence_unified_event(
     except Exception:
         ts = time.time()
 
-    if evidence.event_id == 6008:
+    if evidence.event_id in (6008, 1000, 41):
         severity = "critical"
-    elif evidence.event_id == 1000:
-        severity = "critical"
-    elif evidence.event_id == 1002:
+    elif evidence.event_id in (1001, 1002, 219):
         severity = "warning"
+    elif evidence.event_id == 1074:
+        severity = "info"
     else:
         severity = "warning"
 
@@ -123,13 +153,65 @@ def make_evidence_unified_event(
     )
 
 
+def load_seen_ids_from_json(file_path: str | Path | None = None) -> set[str]:
+    """Load persisted seen evidence event IDs from a JSON file."""
+    if not file_path:
+        return set()
+    path = Path(file_path)
+    if not path.is_file():
+        return set()
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                ids = data.get("seen_ids", [])
+                return set(str(item) for item in ids if isinstance(item, (str, int)))
+            elif isinstance(data, list):
+                return set(str(item) for item in data if isinstance(item, (str, int)))
+    except (PermissionError, OSError, json.JSONDecodeError):
+        pass
+    return set()
+
+
+def save_seen_ids_to_json(
+    seen_ids: set[str] | Iterable[str],
+    file_path: str | Path | None = None,
+) -> bool:
+    """Persist seen evidence event IDs to a JSON file."""
+    if not file_path:
+        return False
+    path = Path(file_path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        id_list = sorted(list(str(x) for x in seen_ids))
+        payload = {
+            "seen_ids": id_list,
+            "count": len(id_list),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        return True
+    except (PermissionError, OSError):
+        return False
+
+
 def persist_windows_evidence(
     store: EventStore,
     evidence_list: list[WindowsEvidence],
     collector: WindowsEvidenceCollector | None = None,
     seen_ids: set[str] | None = None,
+    state_file_path: str | Path | None = None,
 ) -> list[UnifiedEvent]:
-    """Persist Windows crash/hang evidence into EventStore with deterministic deduplication."""
+    """Persist Windows crash/hang evidence into EventStore with deterministic deduplication and JSON persistence."""
+    if seen_ids is None and state_file_path is not None:
+        seen_ids = load_seen_ids_from_json(state_file_path)
+    elif state_file_path is not None and seen_ids is not None:
+        # Merge pre-existing file state into in-memory set to ensure consistency
+        existing_file_ids = load_seen_ids_from_json(state_file_path)
+        seen_ids.update(existing_file_ids)
+
     persisted: list[UnifiedEvent] = []
     for ev in evidence_list:
         unified_ev = make_evidence_unified_event(ev, collector=collector)
@@ -145,4 +227,9 @@ def persist_windows_evidence(
             if seen_ids is not None:
                 seen_ids.add(unified_ev.event_id)
             persisted.append(unified_ev)
+
+    if state_file_path is not None and seen_ids is not None:
+        save_seen_ids_to_json(seen_ids, state_file_path)
+
     return persisted
+

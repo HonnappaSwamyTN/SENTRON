@@ -7,7 +7,12 @@ Guarantees is_automated=False. NEVER automatically terminates or suspends proces
 from __future__ import annotations
 
 from uuid import uuid4
-from sentron.core.models import RecoveryRecommendation, RiskAlert, SystemSnapshot
+from sentron.core.models import (
+    RecoveryRecommendation,
+    RiskAlert,
+    SystemSnapshot,
+    WindowsEvidence,
+)
 
 
 class SafeRecoveryAdvisor:
@@ -39,6 +44,7 @@ class SafeRecoveryAdvisor:
                 confirmed_observations=tuple(confirmed_baseline),
                 suspected_causes=("Heavy workload or background computation occurring.",),
                 is_automated=False,
+                help_url="https://support.microsoft.com/windows/save-and-back-up-your-files-and-apps",
             )
         )
 
@@ -72,6 +78,7 @@ class SafeRecoveryAdvisor:
                         "Multiple concurrent applications running or potential memory leakage in heavy processes.",
                     ),
                     is_automated=False,
+                    help_url="https://support.microsoft.com/windows/tips-to-improve-pc-performance-in-windows",
                 )
             )
 
@@ -96,6 +103,7 @@ class SafeRecoveryAdvisor:
                         "Compute-intensive workload or active background compilation/indexing.",
                     ),
                     is_automated=False,
+                    help_url="https://support.microsoft.com/windows/identify-and-stop-high-cpu-usage-apps",
                 )
             )
 
@@ -111,7 +119,155 @@ class SafeRecoveryAdvisor:
                     confirmed_observations=(f"Free disk space on primary drive is only {free_gb:.1f} GB.",),
                     suspected_causes=("Accumulation of temp files, caches, or large build artifacts.",),
                     is_automated=False,
+                    help_url="https://support.microsoft.com/windows/free-up-drive-space-in-windows",
                 )
             )
 
         return recommendations
+
+    def generate_evidence_recommendations(
+        self,
+        evidence: WindowsEvidence,
+    ) -> list[RecoveryRecommendation]:
+        """Generate safe, non-destructive recovery recommendations for Windows crash/hang evidence."""
+        recommendations: list[RecoveryRecommendation] = []
+        ev_id = evidence.event_id
+
+        if ev_id == 1000:
+            recommendations.append(
+                RecoveryRecommendation(
+                    recommendation_id=str(uuid4()),
+                    severity="critical",
+                    title="Resolve Application Crash",
+                    suggested_action=(
+                        f"Check for available updates for '{evidence.source}' or verify its installed dependencies. "
+                        "Do not forcefully kill related services without saving state."
+                    ),
+                    confirmed_observations=(
+                        f"Application Error event 1000 recorded for '{evidence.source}' at {evidence.event_time}.",
+                    ),
+                    suspected_causes=(
+                        "Unhandled runtime exception, access violation, or corrupt dynamic link library.",
+                    ),
+                    is_automated=False,
+                    help_url="https://learn.microsoft.com/troubleshoot/windows-client/application-management/application-crashes-troubleshooting",
+                )
+            )
+        elif ev_id == 1001:
+            recommendations.append(
+                RecoveryRecommendation(
+                    recommendation_id=str(uuid4()),
+                    severity="warning",
+                    title="Review Windows Error Report (WER)",
+                    suggested_action=(
+                        f"Review WER diagnostic bucket details for '{evidence.source}' in Reliability Monitor "
+                        "or Event Viewer to identify the faulting module."
+                    ),
+                    confirmed_observations=(
+                        f"Windows Error Reporting event 1001 recorded diagnostic fault for '{evidence.source}'.",
+                    ),
+                    suspected_causes=(
+                        "Application fault bucket generated following an unexpected termination.",
+                    ),
+                    is_automated=False,
+                    help_url="https://learn.microsoft.com/windows/win32/wer/windows-error-reporting",
+                )
+            )
+        elif ev_id == 1002:
+            recommendations.append(
+                RecoveryRecommendation(
+                    recommendation_id=str(uuid4()),
+                    severity="warning",
+                    title="Resolve Application Hang",
+                    suggested_action=(
+                        f"Allow pending I/O operations for '{evidence.source}' to finish. "
+                        "If permanently frozen, save other active work before manually restarting the application."
+                    ),
+                    confirmed_observations=(
+                        f"Application Hang event 1002 recorded for '{evidence.source}' at {evidence.event_time}.",
+                    ),
+                    suspected_causes=(
+                        "Main thread deadlock, slow network/disk I/O, or unresponsive window message pump.",
+                    ),
+                    is_automated=False,
+                    help_url="https://learn.microsoft.com/troubleshoot/windows-client/application-management/application-hangs-troubleshooting",
+                )
+            )
+        elif ev_id in (6008, 41):
+            recommendations.append(
+                RecoveryRecommendation(
+                    recommendation_id=str(uuid4()),
+                    severity="critical",
+                    title="Investigate Unexpected System Loss / Shutdown",
+                    suggested_action=(
+                        "Inspect system hardware stability, cooling/thermal metrics, and power supply. "
+                        "Review Windows minidump logs if a blue screen (BSOD) accompanied the restart."
+                    ),
+                    confirmed_observations=(
+                        f"System event {ev_id} recorded abrupt shutdown or power loss at {evidence.event_time}.",
+                    ),
+                    suspected_causes=(
+                        "Sudden power loss, forced hard restart, thermal throttling, or kernel bugcheck.",
+                    ),
+                    is_automated=False,
+                    help_url="https://learn.microsoft.com/troubleshoot/windows-client/performance/event-id-41-restart",
+                )
+            )
+        elif ev_id == 1074:
+            recommendations.append(
+                RecoveryRecommendation(
+                    recommendation_id=str(uuid4()),
+                    severity="info",
+                    title="Review Planned System Restart / Shutdown",
+                    suggested_action=(
+                        f"Verify whether the restart initiated by '{evidence.source}' was scheduled "
+                        "by Windows Update, maintenance scripts, or deliberate user action."
+                    ),
+                    confirmed_observations=(
+                        f"System event 1074 recorded shutdown initiation by '{evidence.source}'.",
+                    ),
+                    suspected_causes=(
+                        "Orderly OS reboot or shutdown request.",
+                    ),
+                    is_automated=False,
+                    help_url="https://learn.microsoft.com/windows/client-management/system-shutdown-events",
+                )
+            )
+        elif ev_id == 219:
+            recommendations.append(
+                RecoveryRecommendation(
+                    recommendation_id=str(uuid4()),
+                    severity="warning",
+                    title="Check Device Driver Configuration",
+                    suggested_action=(
+                        f"Open Device Manager to verify device '{evidence.source}'. "
+                        "Ensure driver firmware is up to date and compatible with this Windows version."
+                    ),
+                    confirmed_observations=(
+                        f"Kernel-PnP event 219 failed to load driver for device '{evidence.source}'.",
+                    ),
+                    suspected_causes=(
+                        "Missing, corrupt, or incompatible hardware device driver.",
+                    ),
+                    is_automated=False,
+                    help_url="https://support.microsoft.com/windows/update-drivers-manually-in-windows",
+                )
+            )
+        else:
+            recommendations.append(
+                RecoveryRecommendation(
+                    recommendation_id=str(uuid4()),
+                    severity="info",
+                    title=f"Review Windows Event {ev_id}",
+                    suggested_action="Inspect Windows Event Viewer details for diagnostic context.",
+                    confirmed_observations=(
+                        f"Event ID {ev_id} recorded in {evidence.log_channel} by '{evidence.source}'.",
+                    ),
+                    suspected_causes=("Operating system diagnostic event logged.",),
+                    is_automated=False,
+                    help_url="https://learn.microsoft.com/windows/win32/wes/windows-event-log",
+                )
+            )
+
+        return recommendations
+

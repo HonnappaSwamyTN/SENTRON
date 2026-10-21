@@ -121,13 +121,15 @@ class CrashGuardPanel(QWidget):
         chart_layout.addWidget(self.chart_widget)
         main_layout.addWidget(chart_group)
 
-        # Windows Crash & Hang Evidence (Diagnostic Log)
-        evidence_group = QGroupBox("Host Crash & Diagnostic Evidence (Windows Event Log)")
+        # Windows Crash, Hang & Diagnostics Evidence (Extended Event Log Coverage)
+        evidence_group = QGroupBox("Host Crash, Hang & System Diagnostics (Windows Event Log: IDs 1000, 1001, 1002, 6008, 41, 1074, 219)")
         evidence_layout = QVBoxLayout(evidence_group)
         evidence_layout.setSpacing(6)
 
         evidence_header = QHBoxLayout()
-        self.lbl_evidence_status = QLabel("Cadence: 60s & on sustained alerts • Waiting for first scan...")
+        self.lbl_evidence_status = QLabel(
+            "Cadence: 60s & on sustained alerts • Coverage: Crash (1000), Hang (1002), WER (1001), Shutdown (6008), Power (41), Restart (1074), Driver (219) • Ready"
+        )
         self.lbl_evidence_status.setStyleSheet("color: #8b949e; font-size: 11px;")
 
         self.btn_scan_evidence = QPushButton("Scan Evidence Now")
@@ -138,6 +140,7 @@ class CrashGuardPanel(QWidget):
         evidence_header.addStretch()
         evidence_header.addWidget(self.btn_scan_evidence)
         evidence_layout.addLayout(evidence_header)
+
 
         self.evidence_table = QTableWidget(0, 4)
         self.evidence_table.setHorizontalHeaderLabels(["Time", "Event ID", "Source", "Explanation"])
@@ -293,7 +296,10 @@ class CrashGuardPanel(QWidget):
         # Build recovery bullet points
         advice_lines = ["Safe Recovery Guidance (Non-Destructive • No Auto-Kill):"]
         for idx, rec in enumerate(recommendations, 1):
-            advice_lines.append(f"  • {rec.title}: {rec.suggested_action}")
+            line = f"  • {rec.title}: {rec.suggested_action}"
+            if rec.help_url:
+                line += f" (Help: {rec.help_url})"
+            advice_lines.append(line)
         self.lbl_recovery_advice.setText("\n".join(advice_lines))
         self.alert_banner.setVisible(True)
 
@@ -364,11 +370,13 @@ class CrashGuardPanel(QWidget):
             self.lbl_evidence_status.setText(f"Status: Fallback active ({warn_msg})")
             self.lbl_evidence_status.setStyleSheet("color: #d29922; font-size: 11px;")
         elif not evidence_records:
-            self.lbl_evidence_status.setText("Status: No crash or hang events recorded in Windows logs.")
+            self.lbl_evidence_status.setText(
+                "Status: No application errors, hangs, power cuts, or unexpected shutdown events recorded in Windows logs."
+            )
             self.lbl_evidence_status.setStyleSheet("color: #8b949e; font-size: 11px;")
         else:
             self.lbl_evidence_status.setText(
-                f"Status: {len(evidence_records)} diagnostic record(s) captured from Windows Event Log"
+                f"Status: {len(evidence_records)} diagnostic record(s) captured across Application & System event logs"
             )
             self.lbl_evidence_status.setStyleSheet("color: #3fb950; font-size: 11px;")
 

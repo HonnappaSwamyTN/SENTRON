@@ -171,10 +171,19 @@ class RecoveryRecommendation:
     confirmed_observations: tuple[str, ...] = ()
     suspected_causes: tuple[str, ...] = ()
     is_automated: bool = False  # Always False in V1
+    help_url: str | None = None
+    help_urls: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "confirmed_observations", tuple(self.confirmed_observations))
         object.__setattr__(self, "suspected_causes", tuple(self.suspected_causes))
+        urls = list(self.help_urls)
+        if self.help_url and self.help_url not in urls:
+            urls.append(self.help_url)
+        object.__setattr__(self, "help_urls", tuple(urls))
+        if not self.help_url and self.help_urls:
+            object.__setattr__(self, "help_url", self.help_urls[0])
+
 
 
 @dataclass(frozen=True, slots=True)

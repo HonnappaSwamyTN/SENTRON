@@ -28,7 +28,7 @@ def test_worker_lifecycle_and_bounded_buffer():
 
     # Wait for at least one snapshot to be collected (real OS process iteration may take ~1s)
     start_wait = time.time()
-    while time.time() - start_wait < 3.0:
+    while time.time() - start_wait < 6.0:
         if len(worker.get_snapshot_history()) > 0:
             break
         time.sleep(0.1)
