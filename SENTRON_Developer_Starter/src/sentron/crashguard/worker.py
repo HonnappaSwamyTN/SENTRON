@@ -158,11 +158,26 @@ class MonitoringWorker:
         self.detector.reset_metric("DiskFreeGB")
         self._wake_event.set()
 
-    def trigger_evidence_collection_async(self) -> None:
-        """Trigger non-blocking background collection of Windows crash evidence."""
+    def is_severe_load(self, snapshot: SystemSnapshot) -> bool:
+        """Return True if system is under severe pressure (CPU > 95% or available RAM < 5%)."""
+        if snapshot.cpu_percent > 95.0:
+            return True
+        if snapshot.memory_percent > 95.0:
+            return True
+        return False
+
+    def trigger_evidence_collection_async(self, force: bool = False) -> bool:
+        """Trigger non-blocking background collection of Windows crash evidence.
+
+        Suppresses collection under severe load unless force=True (Security Rules §7.3).
+        Returns True if a collection thread was dispatched, False otherwise.
+        """
         with self._evidence_lock:
             if self._evidence_thread is not None and self._evidence_thread.is_alive():
-                return
+                return False
+            latest = self.get_latest_snapshot()
+            if not force and latest is not None and self.is_severe_load(latest):
+                return False
             self._last_evidence_time = time.time()
             self._evidence_thread = threading.Thread(
                 target=self._run_evidence_collection,
@@ -170,6 +185,7 @@ class MonitoringWorker:
                 daemon=True,
             )
             self._evidence_thread.start()
+            return True
 
     def _run_evidence_collection(self) -> tuple[list[WindowsEvidence], list[str]]:
         """Executed on dedicated background thread to keep telemetry non-blocking."""
@@ -263,12 +279,14 @@ class MonitoringWorker:
                     pass
 
         # Trigger evidence collection on sustained-risk alert or conservative interval (30-60s)
+        # Suppressed under severe load (>95% CPU or >95% RAM) to prevent system strain (Security Rules §7.3)
         now = time.time()
         has_risk_alert = len(alerts) > 0
         interval_due = (
             self._last_evidence_time == 0.0 or (now - self._last_evidence_time >= self.evidence_interval_seconds)
         )
-        if has_risk_alert or interval_due:
+        severe_load = self.is_severe_load(snapshot)
+        if (has_risk_alert or interval_due) and not severe_load:
             self.trigger_evidence_collection_async()
 
         if self.on_snapshot:
