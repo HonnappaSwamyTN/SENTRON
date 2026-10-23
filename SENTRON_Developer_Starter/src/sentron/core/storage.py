@@ -33,7 +33,8 @@ class EventStore:
         severity TEXT NOT NULL,
         summary TEXT NOT NULL,
         payload_json TEXT NOT NULL,
-        redacted INTEGER DEFAULT 0
+        redacted INTEGER DEFAULT 0,
+        is_simulated INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
@@ -41,8 +42,13 @@ class EventStore:
     CREATE INDEX IF NOT EXISTS idx_events_event_type ON events(event_type);
     """
 
-    def __init__(self, db_path: str | Path = ":memory:", connection: sqlite3.Connection | None = None) -> None:
-        self._lock = RLock()
+    def __init__(
+        self,
+        db_path: str | Path = ":memory:",
+        connection: sqlite3.Connection | None = None,
+        lock: RLock | None = None,
+    ) -> None:
+        self._lock = lock if lock is not None else RLock()
         self._db_path = str(db_path) if isinstance(db_path, Path) else db_path
         if connection is not None:
             self._conn = connection
@@ -54,6 +60,15 @@ class EventStore:
         with self._lock:
             try:
                 self._conn.executescript(self.SCHEMA)
+                cursor = self._conn.execute("PRAGMA table_info(events)")
+                existing_columns = {row[1] for row in cursor.fetchall()}
+                if "is_simulated" not in existing_columns:
+                    self._conn.execute(
+                        "ALTER TABLE events ADD COLUMN is_simulated INTEGER NOT NULL DEFAULT 0"
+                    )
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_events_is_simulated ON events(is_simulated)"
+                )
                 self._conn.commit()
             except sqlite3.Error as exc:
                 raise StorageError(f"Failed to initialize storage schema: {exc}") from exc
@@ -86,10 +101,11 @@ class EventStore:
 
         with self._lock:
             try:
+                is_sim = bool(getattr(event, "is_simulated", False))
                 self._conn.execute(
                     """
-                    INSERT INTO events (event_id, timestamp, subsystem, event_type, severity, summary, payload_json, redacted)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO events (event_id, timestamp, subsystem, event_type, severity, summary, payload_json, redacted, is_simulated)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         event.event_id,
@@ -100,6 +116,7 @@ class EventStore:
                         summary_final,
                         payload_final,
                         1 if is_redacted else 0,
+                        1 if is_sim else 0,
                     ),
                 )
                 self._conn.commit()
@@ -119,30 +136,37 @@ class EventStore:
             summary=summary_final,
             payload_json=payload_final,
             redacted=is_redacted,
+            is_simulated=is_sim,
         )
 
     def record_event(self, event: AuditEvent) -> StoredAuditEvent:
         """AuditSink compatibility for AgentGuard."""
-        from sentron.agentguard.audit import SqliteAuditLog
-        logger = SqliteAuditLog(connection=self._conn)
-        return logger.record_event(event)
+        if not hasattr(self, "_cached_audit_log") or self._cached_audit_log is None:
+            from sentron.agentguard.audit import SqliteAuditLog
+            self._cached_audit_log = SqliteAuditLog(connection=self._conn)
+        return self._cached_audit_log.record_event(event)
 
     def get_recent_events(
         self,
         limit: int = 5,
         subsystem: str | None = None,
+        genuine_only: bool = False,
     ) -> list[StoredAuditEvent]:
         """Retrieve the most recent events ordered newest first."""
         if limit <= 0:
             return []
 
-        query = "SELECT event_id, timestamp, subsystem, event_type, severity, summary, payload_json, redacted FROM events"
+        conditions: list[str] = []
         params: list[object] = []
         if subsystem is not None:
-            query += " WHERE subsystem = ?"
+            conditions.append("subsystem = ?")
             params.append(subsystem)
 
-        query += " ORDER BY timestamp DESC, rowid DESC LIMIT ?"
+        if genuine_only:
+            conditions.append("(is_simulated = 0 OR is_simulated IS NULL)")
+
+        where_clause = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        query = f"SELECT event_id, timestamp, subsystem, event_type, severity, summary, payload_json, redacted, is_simulated FROM events{where_clause} ORDER BY timestamp DESC, rowid DESC LIMIT ?"
         params.append(limit)
 
         with self._lock:
@@ -162,6 +186,7 @@ class EventStore:
                 summary=row[5],
                 payload_json=row[6],
                 redacted=bool(row[7]),
+                is_simulated=bool(row[8]) if len(row) > 8 and row[8] is not None else False,
             )
             for row in rows
         ]
@@ -171,20 +196,24 @@ class EventStore:
         start_time: float | None = None,
         end_time: float | None = None,
         limit: int = 50,
+        genuine_only: bool = False,
     ) -> list[StoredAuditEvent]:
         """Retrieve unified timeline interleaving AgentGuard and CrashGuard events (AC-16)."""
-        query = "SELECT event_id, timestamp, subsystem, event_type, severity, summary, payload_json, redacted FROM events WHERE 1=1"
+        conditions: list[str] = ["1=1"]
         params: list[object] = []
 
         if start_time is not None:
-            query += " AND timestamp >= ?"
+            conditions.append("timestamp >= ?")
             params.append(start_time)
 
         if end_time is not None:
-            query += " AND timestamp <= ?"
+            conditions.append("timestamp <= ?")
             params.append(end_time)
 
-        query += " ORDER BY timestamp DESC, rowid DESC LIMIT ?"
+        if genuine_only:
+            conditions.append("(is_simulated = 0 OR is_simulated IS NULL)")
+
+        query = f"SELECT event_id, timestamp, subsystem, event_type, severity, summary, payload_json, redacted, is_simulated FROM events WHERE {' AND '.join(conditions)} ORDER BY timestamp DESC, rowid DESC LIMIT ?"
         params.append(limit)
 
         with self._lock:
@@ -204,6 +233,7 @@ class EventStore:
                 summary=row[5],
                 payload_json=row[6],
                 redacted=bool(row[7]),
+                is_simulated=bool(row[8]) if len(row) > 8 and row[8] is not None else False,
             )
             for row in rows
         ]
@@ -214,25 +244,29 @@ class EventStore:
         subsystem: str | None = None,
         severity: str | None = None,
         limit: int = 50,
+        genuine_only: bool = False,
     ) -> list[StoredAuditEvent]:
         """Search historical events across all or specific subsystems (AC-08, AC-16)."""
-        sql = "SELECT event_id, timestamp, subsystem, event_type, severity, summary, payload_json, redacted FROM events WHERE 1=1"
+        conditions: list[str] = ["1=1"]
         params: list[object] = []
 
         if subsystem is not None:
-            sql += " AND subsystem = ?"
+            conditions.append("subsystem = ?")
             params.append(subsystem)
 
+        if genuine_only:
+            conditions.append("(is_simulated = 0 OR is_simulated IS NULL)")
+
         if query:
-            sql += " AND (summary LIKE ? OR event_type LIKE ? OR payload_json LIKE ?)"
+            conditions.append("(summary LIKE ? OR event_type LIKE ? OR payload_json LIKE ?)")
             like_term = f"%{query}%"
             params.extend([like_term, like_term, like_term])
 
         if severity is not None:
-            sql += " AND severity = ?"
+            conditions.append("severity = ?")
             params.append(severity)
 
-        sql += " ORDER BY timestamp DESC, rowid DESC LIMIT ?"
+        sql = f"SELECT event_id, timestamp, subsystem, event_type, severity, summary, payload_json, redacted, is_simulated FROM events WHERE {' AND '.join(conditions)} ORDER BY timestamp DESC, rowid DESC LIMIT ?"
         params.append(limit)
 
         with self._lock:
@@ -252,6 +286,7 @@ class EventStore:
                 summary=row[5],
                 payload_json=row[6],
                 redacted=bool(row[7]),
+                is_simulated=bool(row[8]) if len(row) > 8 and row[8] is not None else False,
             )
             for row in rows
         ]

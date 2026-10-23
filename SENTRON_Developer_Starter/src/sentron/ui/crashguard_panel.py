@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QFrame,
     QSizePolicy,
+    QMessageBox,
 )
 
 from sentron.core.models import (
@@ -23,8 +24,10 @@ from sentron.core.models import (
     SystemSnapshot,
     WindowsEvidence,
 )
+from sentron.crashguard.process_control import ProcessController
 from sentron.crashguard.worker import MonitoringWorker
 from sentron.ui.chart_widget import ResourceChartWidget
+from sentron.ui.process_dialog import ProcessReviewDialog
 
 
 class CrashGuardPanel(QWidget):
@@ -42,9 +45,16 @@ class CrashGuardPanel(QWidget):
         self._current_alert: RiskAlert | None = None
         self._current_evidence: list[WindowsEvidence] = []
         self._evidence_warnings: list[str] = []
+        self.resource_risk_threshold: float = 93.0
+        self.temp_warning_threshold: float = 80.0
+        self._theme: str = "light"
 
         self._init_ui()
 
+    def set_theme(self, theme_name: str) -> None:
+        """Propagate active theme to child chart and widgets."""
+        self._theme = (theme_name or "light").lower()
+        self.chart_widget.set_theme(self._theme)
 
     def _init_ui(self) -> None:
         main_layout = QVBoxLayout(self)
@@ -54,7 +64,8 @@ class CrashGuardPanel(QWidget):
         # Header with live status badge and timestamp
         header_layout = QHBoxLayout()
         title_label = QLabel("⚡ CrashGuard System Health Guardian")
-        title_label.setStyleSheet("font-size: 16px; font-weight: 800; color: #171717;")
+        title_label.setObjectName("headerTitle")
+        title_label.setStyleSheet("font-size: 16px; font-weight: 800;")
 
         self.lbl_status = QLabel("MONITORING ACTIVE • 2s CADENCE")
         self.lbl_status.setObjectName("badgeActive")
@@ -68,17 +79,23 @@ class CrashGuardPanel(QWidget):
         header_layout.addWidget(self.lbl_status)
         main_layout.addLayout(header_layout)
 
-        # Stat cards row (CPU, RAM, Disk)
+        # Stat cards row (CPU, RAM, Disk, CPU Temperature)
         cards_layout = QHBoxLayout()
         cards_layout.setSpacing(8)
 
-        self.card_cpu = self._create_stat_card("CPU UTILIZATION", "0.0%", "Warning threshold: >85% (sustained)")
+        self.card_cpu = self._create_stat_card("CPU UTILIZATION", "0.0%", "Warning threshold: >93% (sustained)")
         self.card_ram = self._create_stat_card("RAM UTILIZATION", "0.0%", "Available: -- MB")
         self.card_disk = self._create_stat_card("DISK STORAGE", "-- GB", "Primary Drive Free Space")
+        self.card_temp = self._create_stat_card(
+            "CPU TEMPERATURE",
+            "Unavailable",
+            "Your hardware or Windows configuration does not expose CPU temperature to SENTRON without elevated access. Other CrashGuard monitoring remains active.",
+        )
 
         cards_layout.addWidget(self.card_cpu)
         cards_layout.addWidget(self.card_ram)
         cards_layout.addWidget(self.card_disk)
+        cards_layout.addWidget(self.card_temp)
         main_layout.addLayout(cards_layout)
 
         # Sustained-Risk Alert Banner (Hidden by default, shown upon alert)
@@ -93,7 +110,7 @@ class CrashGuardPanel(QWidget):
         self.lbl_alert_title.setStyleSheet("font-weight: 800; color: #f85149; font-size: 13px;")
 
         btn_dismiss = QPushButton("Dismiss Alert")
-        btn_dismiss.setStyleSheet("background-color: #21262d; padding: 4px 10px; font-size: 11px;")
+        btn_dismiss.setStyleSheet("background-color: #21262d; color: #f0f6fc; padding: 4px 10px; font-size: 11px;")
         btn_dismiss.clicked.connect(self._dismiss_alert)
 
         alert_header.addWidget(self.lbl_alert_title)
@@ -114,10 +131,10 @@ class CrashGuardPanel(QWidget):
         self.alert_banner.setVisible(False)
         main_layout.addWidget(self.alert_banner)
 
-        # Rolling History Chart
-        chart_group = QGroupBox("Rolling Resource History (Live psutil Telemetry)")
+        # Rolling History Chart (Live psutil + Temperature Telemetry)
+        chart_group = QGroupBox("Rolling Resource History (Live psutil & Temperature Telemetry)")
         chart_layout = QVBoxLayout(chart_group)
-        self.chart_widget = ResourceChartWidget(max_samples=60, warning_threshold=85.0)
+        self.chart_widget = ResourceChartWidget(max_samples=60, warning_threshold=self.resource_risk_threshold)
         chart_layout.addWidget(self.chart_widget)
         main_layout.addWidget(chart_group)
 
@@ -130,10 +147,10 @@ class CrashGuardPanel(QWidget):
         self.lbl_evidence_status = QLabel(
             "Cadence: 60s & on sustained alerts • Coverage: Crash (1000), Hang (1002), WER (1001), Shutdown (6008), Power (41), Restart (1074), Driver (219) • Ready"
         )
-        self.lbl_evidence_status.setStyleSheet("color: #8b949e; font-size: 11px;")
+        self.lbl_evidence_status.setStyleSheet("color: #4A453A; font-size: 11px; font-weight: 500;")
 
         self.btn_scan_evidence = QPushButton("Scan Evidence Now")
-        self.btn_scan_evidence.setStyleSheet("background-color: #21262d; padding: 4px 10px; font-size: 11px;")
+        self.btn_scan_evidence.setStyleSheet("padding: 4px 10px; font-size: 11px;")
         self.btn_scan_evidence.clicked.connect(self._on_scan_evidence_clicked)
 
         evidence_header.addWidget(self.lbl_evidence_status)
@@ -154,66 +171,77 @@ class CrashGuardPanel(QWidget):
 
         main_layout.addWidget(evidence_group)
 
-        # Bottom section: Top Processes Table & Synthetic Demo Controls
-        bottom_row = QHBoxLayout()
-
-        bottom_row.setSpacing(12)
-
-        # Top processes table
-        proc_group = QGroupBox("Top Active Processes (Safe Ordinary Permissions)")
+        # Bottom section: Top Active Processes and Process Hold Controls
+        proc_group = QGroupBox("Top Active Processes & Controlled Load Response")
         proc_layout = QVBoxLayout(proc_group)
+        proc_layout.setSpacing(8)
+
+        proc_header = QHBoxLayout()
+        lbl_proc_desc = QLabel("Real host processes sorted by physical memory. Use Controlled Hold to relieve load safely.")
+        lbl_proc_desc.setStyleSheet("font-size: 11px;")
+
+        self.btn_review_processes = QPushButton("⚡ Review High-Impact Processes")
+        self.btn_review_processes.setObjectName("btnWarning")
+        self.btn_review_processes.setStyleSheet("font-weight: 700; font-size: 11px; padding: 4px 12px;")
+        self.btn_review_processes.clicked.connect(self.open_process_review_dialog)
+
+        proc_header.addWidget(lbl_proc_desc)
+        proc_header.addStretch()
+        proc_header.addWidget(self.btn_review_processes)
+        proc_layout.addLayout(proc_header)
+
         self.proc_table = QTableWidget(0, 4)
         self.proc_table.setHorizontalHeaderLabels(["PID", "Process Name", "CPU %", "RAM (MB)"])
         self.proc_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.proc_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.proc_table.setMinimumHeight(100)
+        self.proc_table.setMinimumHeight(110)
         self.proc_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         proc_layout.addWidget(self.proc_table)
-        bottom_row.addWidget(proc_group, stretch=3)
 
-        # Synthetic Demonstration Box
-        demo_group = QGroupBox("Synthetic Demo Controls (Safe Test)")
-        demo_layout = QVBoxLayout(demo_group)
-        demo_info = QLabel(
-            "Test sustained-risk alerts & safe recovery recommendations without overloading your PC:"
+        # Suspended Processes Drawer (visible when any processes are suspended)
+        self.suspended_card = QFrame()
+        self.suspended_card.setObjectName("statCard")
+        self.suspended_card.setStyleSheet(
+            "border: 1px dashed #E2B83B; border-radius: 6px; padding: 8px;"
         )
-        demo_info.setStyleSheet("color: #8b949e; font-size: 11px;")
-        demo_info.setWordWrap(True)
-        demo_layout.addWidget(demo_info)
+        susp_vbox = QVBoxLayout(self.suspended_card)
+        susp_vbox.setSpacing(6)
 
-        self.btn_sim_cpu = QPushButton("Simulate Sustained CPU (92%)")
-        self.btn_sim_cpu.setObjectName("btnWarning")
-        self.btn_sim_cpu.clicked.connect(self._simulate_cpu_load)
-        demo_layout.addWidget(self.btn_sim_cpu)
+        susp_header = QHBoxLayout()
+        lbl_susp_title = QLabel("⏸️ Processes Currently Held on Pause by SENTRON")
+        lbl_susp_title.setStyleSheet("font-weight: 700; color: #E2B83B; font-size: 11px;")
+        susp_header.addWidget(lbl_susp_title)
+        susp_header.addStretch()
 
-        self.btn_sim_ram = QPushButton("Simulate Sustained RAM (94%)")
-        self.btn_sim_ram.setObjectName("btnWarning")
-        self.btn_sim_ram.clicked.connect(self._simulate_ram_load)
-        demo_layout.addWidget(self.btn_sim_ram)
+        self.btn_resume_all = QPushButton("Resume All Held Processes")
+        self.btn_resume_all.setStyleSheet("padding: 3px 8px; font-size: 10px;")
+        self.btn_resume_all.clicked.connect(self._on_resume_all_clicked)
+        susp_header.addWidget(self.btn_resume_all)
+        susp_vbox.addLayout(susp_header)
 
-        self.btn_reset_live = QPushButton("Reset to Authentic Live")
-        self.btn_reset_live.clicked.connect(self._reset_to_authentic)
-        demo_layout.addWidget(self.btn_reset_live)
+        self.suspended_table = QTableWidget(0, 4)
+        self.suspended_table.setHorizontalHeaderLabels(["PID", "Name", "Memory (MB)", "Action"])
+        self.suspended_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.suspended_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.suspended_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.suspended_table.setMaximumHeight(90)
+        susp_vbox.addWidget(self.suspended_table)
 
-        demo_note = QLabel("[DEMO] Never mixed with authentic telemetry.")
-        demo_note.setStyleSheet("color: #6e7681; font-size: 10px; font-style: italic;")
-        demo_layout.addWidget(demo_note)
-        demo_layout.addStretch()
+        self.suspended_card.setVisible(False)
+        proc_layout.addWidget(self.suspended_card)
 
-        bottom_row.addWidget(demo_group, stretch=2)
-        main_layout.addLayout(bottom_row)
+        main_layout.addWidget(proc_group)
 
     def _create_stat_card(self, title: str, value: str, subtitle: str) -> QFrame:
         card = QFrame()
+        card.setObjectName("statCard")
         card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        card.setStyleSheet(
-            "background-color: #171717; border: 1px solid #333333; border-radius: 8px; padding: 10px;"
-        )
         layout = QVBoxLayout(card)
         layout.setSpacing(2)
 
         lbl_t = QLabel(title)
-        lbl_t.setStyleSheet("color: #D9D4C8; font-size: 11px; font-weight: 700; letter-spacing: 0.5px;")
+        lbl_t.setObjectName("statTitle")
+        lbl_t.setStyleSheet("font-size: 11px; font-weight: 700; letter-spacing: 0.5px;")
         layout.addWidget(lbl_t)
 
         lbl_v = QLabel(value)
@@ -223,7 +251,8 @@ class CrashGuardPanel(QWidget):
 
         lbl_s = QLabel(subtitle)
         lbl_s.setObjectName("subLabel")
-        lbl_s.setStyleSheet("color: #8C8578; font-size: 11px;")
+        lbl_s.setStyleSheet("font-size: 11px;")
+        lbl_s.setWordWrap(True)
         layout.addWidget(lbl_s)
 
         return card
@@ -238,7 +267,7 @@ class CrashGuardPanel(QWidget):
         cpu_val_lbl = self.card_cpu.findChild(QLabel, "valLabel")
         if cpu_val_lbl:
             cpu_val_lbl.setText(f"{snapshot.cpu_percent:.1f}%")
-            if snapshot.cpu_percent >= 85.0:
+            if snapshot.cpu_percent >= self.resource_risk_threshold:
                 cpu_val_lbl.setStyleSheet("color: #E05252; font-size: 22px; font-weight: 800;")
             else:
                 cpu_val_lbl.setStyleSheet("color: #E2B83B; font-size: 22px; font-weight: 800;")
@@ -247,7 +276,7 @@ class CrashGuardPanel(QWidget):
         ram_sub_lbl = self.card_ram.findChild(QLabel, "subLabel")
         if ram_val_lbl:
             ram_val_lbl.setText(f"{snapshot.memory_percent:.1f}%")
-            if snapshot.memory_percent >= 85.0:
+            if snapshot.memory_percent >= self.resource_risk_threshold:
                 ram_val_lbl.setStyleSheet("color: #E05252; font-size: 22px; font-weight: 800;")
             else:
                 ram_val_lbl.setStyleSheet("color: #F5F2E9; font-size: 22px; font-weight: 800;")
@@ -260,16 +289,53 @@ class CrashGuardPanel(QWidget):
             free_gb = snapshot.disk_free_bytes / (1024**3)
             disk_val_lbl.setText(f"{free_gb:.1f} GB")
 
-        # Update rolling chart
-        self.chart_widget.update_metrics(snapshot.cpu_percent, snapshot.memory_percent)
+        # Update CPU Temperature card
+        temp_val_lbl = self.card_temp.findChild(QLabel, "valLabel")
+        temp_sub_lbl = self.card_temp.findChild(QLabel, "subLabel")
+        if temp_val_lbl and temp_sub_lbl:
+            if snapshot.cpu_temperature_c is not None:
+                temp_val_lbl.setText(f"{snapshot.cpu_temperature_c:.1f}°C")
+                if snapshot.cpu_temperature_c >= self.temp_warning_threshold:
+                    temp_val_lbl.setStyleSheet("color: #E05252; font-size: 22px; font-weight: 800;")
+                    temp_sub_lbl.setText(f"Elevated (Advisory >{self.temp_warning_threshold:.0f}°C)")
+                else:
+                    temp_val_lbl.setStyleSheet("color: #E2B83B; font-size: 22px; font-weight: 800;")
+                    temp_sub_lbl.setText(f"Normal • {snapshot.cpu_temperature_reason or 'Active Sensor'}")
+            else:
+                temp_val_lbl.setText("Unavailable")
+                temp_val_lbl.setStyleSheet("color: #8C8578; font-size: 20px; font-weight: 700;")
+                temp_sub_lbl.setText(
+                    "Your hardware or Windows configuration does not expose CPU temperature to SENTRON "
+                    "without elevated access. Other CrashGuard monitoring remains active."
+                )
 
-        # Update processes table
-        self.proc_table.setRowCount(len(snapshot.top_processes))
+        # Update rolling chart
+        self.chart_widget.update_metrics(snapshot.cpu_percent, snapshot.memory_percent, snapshot.cpu_temperature_c)
+
+        # Update processes table (reusing existing items to minimize RAM and GC churn)
+        if self.proc_table.rowCount() != len(snapshot.top_processes):
+            self.proc_table.setRowCount(len(snapshot.top_processes))
         for r_idx, proc in enumerate(snapshot.top_processes):
-            self.proc_table.setItem(r_idx, 0, QTableWidgetItem(str(proc.pid)))
-            self.proc_table.setItem(r_idx, 1, QTableWidgetItem(proc.name))
-            self.proc_table.setItem(r_idx, 2, QTableWidgetItem(f"{proc.cpu_percent:.1f}%"))
-            self.proc_table.setItem(r_idx, 3, QTableWidgetItem(f"{proc.memory_mb:.1f} MB"))
+            item_pid = self.proc_table.item(r_idx, 0)
+            if item_pid is None:
+                self.proc_table.setItem(r_idx, 0, QTableWidgetItem(str(proc.pid)))
+                self.proc_table.setItem(r_idx, 1, QTableWidgetItem(proc.name))
+                self.proc_table.setItem(r_idx, 2, QTableWidgetItem(f"{proc.cpu_percent:.1f}%"))
+                self.proc_table.setItem(r_idx, 3, QTableWidgetItem(f"{proc.memory_mb:.1f} MB"))
+            else:
+                item_pid.setText(str(proc.pid))
+                item_name = self.proc_table.item(r_idx, 1)
+                if item_name:
+                    item_name.setText(proc.name)
+                item_cpu = self.proc_table.item(r_idx, 2)
+                if item_cpu:
+                    item_cpu.setText(f"{proc.cpu_percent:.1f}%")
+                item_ram = self.proc_table.item(r_idx, 3)
+                if item_ram:
+                    item_ram.setText(f"{proc.memory_mb:.1f} MB")
+
+        # Update suspended processes drawer
+        self._refresh_suspended_processes_table()
 
         # Update status badge
         if "synthetic_demo_mode" in snapshot.unavailable_metrics:
@@ -281,15 +347,59 @@ class CrashGuardPanel(QWidget):
             self.lbl_status.setObjectName("badgeActive")
             self.lbl_status.setStyleSheet("background-color: #1f6feb22; color: #58a6ff; border: 1px solid #388bfd;")
 
+    def _refresh_suspended_processes_table(self) -> None:
+        controller = ProcessController.get_instance()
+        suspended = controller.get_suspended_processes()
+        if not suspended:
+            self.suspended_card.setVisible(False)
+            return
+
+        self.suspended_card.setVisible(True)
+        self.suspended_table.setRowCount(len(suspended))
+        for r, sp in enumerate(suspended):
+            item_pid = QTableWidgetItem(str(sp.pid))
+            item_name = QTableWidgetItem(sp.name)
+            item_mem = QTableWidgetItem(f"{sp.memory_mb:.1f} MB")
+
+            btn_resume = QPushButton("Resume")
+            btn_resume.setStyleSheet("padding: 2px 8px; font-size: 10px;")
+            # Capture PID in lambda
+            btn_resume.clicked.connect(lambda checked=False, p_pid=sp.pid: self._on_resume_single(p_pid))
+
+            self.suspended_table.setItem(r, 0, item_pid)
+            self.suspended_table.setItem(r, 1, item_name)
+            self.suspended_table.setItem(r, 2, item_mem)
+            self.suspended_table.setCellWidget(r, 3, btn_resume)
+
+    def _on_resume_single(self, pid: int) -> None:
+        controller = ProcessController.get_instance()
+        success, msg = controller.resume_process(pid)
+        if success:
+            self._refresh_suspended_processes_table()
+        else:
+            QMessageBox.warning(self, "Resume Failed", msg)
+
+    def _on_resume_all_clicked(self) -> None:
+        controller = ProcessController.get_instance()
+        controller.resume_all_suspended()
+        self._refresh_suspended_processes_table()
+
+    def open_process_review_dialog(self) -> None:
+        """Open the controlled process review and safe-hold dialog."""
+        dialog = ProcessReviewDialog(parent=self, theme=self._theme)
+        dialog.exec()
+        self._refresh_suspended_processes_table()
+
     @Slot(object, list)
     def handle_alert(self, alert: RiskAlert, recommendations: list[RecoveryRecommendation]) -> None:
         """Called when a sustained threshold breach alert occurs."""
         self._current_alert = alert
+        unit = "%" if alert.metric_name in ("CPU", "Memory") else ("°C" if alert.metric_name == "CPUTemperature" else "GB")
         self.lbl_alert_title.setText(
-            f"⚠️ SUSTAINED {alert.metric_name.upper()} PRESSURE ({alert.observed_value:.1f}% for {alert.duration_seconds:.0f}s)"
+            f"⚠️ SUSTAINED {alert.metric_name.upper()} PRESSURE ({alert.observed_value:.1f}{unit} for {alert.duration_seconds:.0f}s)"
         )
         self.lbl_alert_desc.setText(
-            f"Observed value of {alert.observed_value:.1f}% exceeded threshold of {alert.threshold_value:.1f}% continuously. "
+            f"Observed value of {alert.observed_value:.1f}{unit} exceeded risk limit of {alert.threshold_value:.1f}{unit} continuously. "
             "Evidence indicates sustained system load."
         )
 
@@ -308,12 +418,16 @@ class CrashGuardPanel(QWidget):
         self._current_alert = None
 
     def _simulate_cpu_load(self) -> None:
-        """Trigger synthetic 92% CPU load for demonstration testing."""
-        self.worker.trigger_synthetic_demo_load(metric_name="CPU", value=92.0)
+        """Trigger synthetic 94% CPU load for demonstration testing (breaches 93% limit)."""
+        self.worker.trigger_synthetic_demo_load(metric_name="CPU", value=94.0)
 
     def _simulate_ram_load(self) -> None:
-        """Trigger synthetic 94% RAM load for demonstration testing."""
+        """Trigger synthetic 94% RAM load for demonstration testing (breaches 93% limit)."""
         self.worker.trigger_synthetic_demo_load(metric_name="Memory", value=94.0)
+
+    def _simulate_temp_load(self) -> None:
+        """Trigger synthetic 86°C CPU Temperature for demonstration testing (breaches 80°C advisory limit)."""
+        self.worker.trigger_synthetic_demo_load(metric_name="CPUTemperature", value=86.0)
 
     def _reset_to_authentic(self) -> None:
         """Clear synthetic simulation and resume authentic measurements."""

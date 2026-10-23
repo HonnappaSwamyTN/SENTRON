@@ -11,6 +11,11 @@ from typing import Any
 from sentron.core.models import WindowsEvidence
 
 
+import threading
+
+_POWERSHELL_LOCK = threading.Lock()
+
+
 class WindowsEventLogAdapter:
     """Safely queries Windows Event Logs for Application Error, Hang, and Shutdown events."""
 
@@ -53,21 +58,41 @@ class WindowsEventLogAdapter:
                 "Write-Output \"$id|$log|$src|$time|$msg\" "
                 "}"
             )
-            result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps_script],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-            if result.returncode != 0 and result.stderr:
-                err_lower = result.stderr.lower()
+            kwargs: dict[str, Any] = {
+                "capture_output": True,
+                "text": True,
+                "timeout": 3,
+                "check": False,
+                "close_fds": True,
+            }
+            if self.is_windows and hasattr(subprocess, "CREATE_NO_WINDOW"):
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+            with _POWERSHELL_LOCK:
+                result = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps_script],
+                    **kwargs,
+                )
+
+            stdout_str = (
+                result.stdout if isinstance(result.stdout, str)
+                else result.stdout.decode("utf-8", errors="replace") if result.stdout
+                else ""
+            ).strip()
+            stderr_str = (
+                result.stderr if isinstance(result.stderr, str)
+                else result.stderr.decode("utf-8", errors="replace") if result.stderr
+                else ""
+            ).strip()
+
+            if result.returncode != 0 and stderr_str:
+                err_lower = stderr_str.lower()
                 if "access is denied" in err_lower or "unauthorizedaccessexception" in err_lower:
                     unavailable.append("windows_event_log_access_denied")
                 else:
                     unavailable.append("windows_event_log_unavailable")
-            elif result.returncode == 0 and result.stdout.strip():
-                for line in result.stdout.strip().splitlines():
+            elif result.returncode == 0 and stdout_str:
+                for line in stdout_str.splitlines():
                     parts = line.split("|", 4)
                     if len(parts) == 5:
                         ev_id_str, log_chan, provider, ev_time, desc = parts

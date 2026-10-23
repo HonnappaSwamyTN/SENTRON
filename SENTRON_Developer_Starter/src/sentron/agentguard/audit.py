@@ -33,6 +33,7 @@ class StoredAuditEvent:
     summary: str
     payload_json: str
     redacted: bool = False
+    is_simulated: bool = False
 
     @property
     def payload(self) -> dict:
@@ -40,6 +41,18 @@ class StoredAuditEvent:
             return json.loads(self.payload_json)
         except json.JSONDecodeError:
             return {}
+
+    @property
+    def is_test_data(self) -> bool:
+        if self.is_simulated:
+            return True
+        if self.payload.get("is_simulated") is True:
+            return True
+        if "[SIMULATED / TEST DATA]" in self.summary or "[SIMULATED DEMO" in self.summary:
+            return True
+        if self.subsystem == "Test":
+            return True
+        return False
 
 
 # Regex patterns for detecting and sanitizing common secret tokens in audit text
@@ -105,7 +118,8 @@ class SqliteAuditLog:
         severity TEXT NOT NULL,
         summary TEXT NOT NULL,
         payload_json TEXT NOT NULL,
-        redacted INTEGER DEFAULT 0
+        redacted INTEGER DEFAULT 0,
+        is_simulated INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
@@ -125,7 +139,23 @@ class SqliteAuditLog:
     def _init_schema(self) -> None:
         with self._lock:
             try:
+                # 1. Execute table creation and non-migrated base indexes
                 self._conn.executescript(self.SCHEMA)
+
+                # 2. Inspect existing columns using PRAGMA table_info(events)
+                cursor = self._conn.execute("PRAGMA table_info(events)")
+                existing_columns = {row[1] for row in cursor.fetchall()}
+
+                # 3. If is_simulated is missing from existing database, safely migrate it
+                if "is_simulated" not in existing_columns:
+                    self._conn.execute(
+                        "ALTER TABLE events ADD COLUMN is_simulated INTEGER NOT NULL DEFAULT 0"
+                    )
+
+                # 4. Create index referencing is_simulated ONLY after column is guaranteed to exist
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_events_is_simulated ON events(is_simulated)"
+                )
                 self._conn.commit()
             except sqlite3.Error as exc:
                 raise AuditStorageError(f"Failed to initialize SQLite audit schema: {exc}") from exc
@@ -134,8 +164,16 @@ class SqliteAuditLog:
         """Persist an AuditEvent conforming to the AuditSink protocol."""
         event_id = str(uuid4())
         timestamp = event.timestamp.timestamp()
-        subsystem = "AgentGuard"
+        subsystem = getattr(event, "subsystem", "AgentGuard")
         severity = _determine_severity(event)
+
+        is_sim = getattr(event, "is_simulated", False)
+        sess = getattr(event, "session_id", None) or ""
+        agent = getattr(event, "agent_id", None) or ""
+        if "simulat" in str(sess).lower() or "test" in str(sess).lower():
+            is_sim = True
+        elif "demo-" in str(agent).lower() or "test-" in str(agent).lower() or "simulat" in str(agent).lower():
+            is_sim = True
 
         # Build raw summary and payload
         raw_summary = (
@@ -144,6 +182,9 @@ class SqliteAuditLog:
         )
         if event.explanation:
             raw_summary += f" - {event.explanation}"
+
+        if is_sim and "[SIMULATED / TEST DATA]" not in raw_summary:
+            raw_summary = f"[SIMULATED / TEST DATA] {raw_summary}"
 
         raw_payload = {
             "action_id": event.action_id,
@@ -154,6 +195,8 @@ class SqliteAuditLog:
             "execution_status": event.execution_status,
             "approval_id": event.approval_id,
             "session_id": getattr(event, "session_id", None),
+            "is_simulated": is_sim,
+            "source": "simulated_test" if is_sim else "production",
         }
 
         # Redact secrets from summary and payload
@@ -181,8 +224,8 @@ class SqliteAuditLog:
             try:
                 self._conn.execute(
                     """
-                    INSERT INTO events (event_id, timestamp, subsystem, event_type, severity, summary, payload_json, redacted)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO events (event_id, timestamp, subsystem, event_type, severity, summary, payload_json, redacted, is_simulated)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         event_id,
@@ -193,6 +236,7 @@ class SqliteAuditLog:
                         summary_final,
                         payload_json,
                         1 if is_redacted else 0,
+                        1 if is_sim else 0,
                     ),
                 )
                 self._conn.commit()
@@ -208,27 +252,34 @@ class SqliteAuditLog:
             summary=summary_final,
             payload_json=payload_json,
             redacted=is_redacted,
+            is_simulated=is_sim,
         )
 
     def get_recent_events(
         self,
-        limit: int = 5,
+        limit: int = 20,
         subsystem: str | None = "AgentGuard",
+        genuine_only: bool = False,
     ) -> list[StoredAuditEvent]:
         """Retrieve the most recent audit events ordered newest first.
 
-        Governing Criteria: AC-08 (defaults to limit=5, subsystem='AgentGuard').
+        Governing Criteria: AC-08 (defaults to limit=20, subsystem='AgentGuard').
         """
         if limit <= 0:
             return []
 
-        query = "SELECT event_id, timestamp, subsystem, event_type, severity, summary, payload_json, redacted FROM events"
+        conditions: list[str] = []
         params: list[object] = []
+
         if subsystem is not None:
-            query += " WHERE subsystem = ?"
+            conditions.append("subsystem = ?")
             params.append(subsystem)
 
-        query += " ORDER BY timestamp DESC, rowid DESC LIMIT ?"
+        if genuine_only:
+            conditions.append("(is_simulated = 0 OR is_simulated IS NULL)")
+
+        where_clause = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        query = f"SELECT event_id, timestamp, subsystem, event_type, severity, summary, payload_json, redacted, is_simulated FROM events{where_clause} ORDER BY timestamp DESC, rowid DESC LIMIT ?"
         params.append(limit)
 
         with self._lock:
@@ -248,6 +299,7 @@ class SqliteAuditLog:
                 summary=row[5],
                 payload_json=row[6],
                 redacted=bool(row[7]),
+                is_simulated=bool(row[8]) if len(row) > 8 and row[8] is not None else False,
             )
             for row in rows
         ]
@@ -260,17 +312,21 @@ class SqliteAuditLog:
         severity: str | None = None,
         session_id: str | None = None,
         limit: int = 50,
+        genuine_only: bool = False,
     ) -> list[StoredAuditEvent]:
         """Search historical audit events by keyword, agent ID, and severity.
 
         Governing Criteria: AC-08.
         """
-        sql = "SELECT event_id, timestamp, subsystem, event_type, severity, summary, payload_json, redacted FROM events WHERE 1=1"
+        sql = "SELECT event_id, timestamp, subsystem, event_type, severity, summary, payload_json, redacted, is_simulated FROM events WHERE 1=1"
         params: list[object] = []
 
         if subsystem is not None:
             sql += " AND subsystem = ?"
             params.append(subsystem)
+
+        if genuine_only:
+            sql += " AND (is_simulated = 0 OR is_simulated IS NULL)"
 
         if query:
             sql += " AND (summary LIKE ? OR event_type LIKE ? OR payload_json LIKE ?)"
@@ -301,6 +357,7 @@ class SqliteAuditLog:
                 summary=row[5],
                 payload_json=row[6],
                 redacted=bool(row[7]),
+                is_simulated=bool(row[8]) if len(row) > 8 and row[8] is not None else False,
             )
             for row in rows
         ]

@@ -76,6 +76,7 @@ class AuditEvent:
     execution_status: str | None = None
     approval_id: str | None = None
     session_id: str | None = None
+    is_simulated: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +125,16 @@ class ProcessSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class SuspendedProcessInfo:
+    pid: int
+    name: str
+    paused_at: float
+    cpu_percent: float = 0.0
+    memory_mb: float = 0.0
+    reason: str = "High system resource load reduction"
+
+
+@dataclass(frozen=True, slots=True)
 class SystemSnapshot:
     timestamp: float
     cpu_percent: float
@@ -133,6 +144,9 @@ class SystemSnapshot:
     disk_busy_percent: float | None = None
     top_processes: tuple[ProcessSummary, ...] = ()
     unavailable_metrics: tuple[str, ...] = ()
+    cpu_temperature_c: float | None = None
+    cpu_temperature_status: str = "unavailable"
+    cpu_temperature_reason: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "top_processes", tuple(self.top_processes))
@@ -150,6 +164,9 @@ class RiskAlert:
     cooldown_until: float
     timestamp: float
     is_simulated: bool = False
+    contributor_process: str | None = None
+    contributor_pid: int | None = None
+    contributor_details: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +177,7 @@ class WindowsEvidence:
     event_time: str
     description: str
     raw_data: dict[str, Any] | None = None
+    is_simulated: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,10 +208,11 @@ class RecoveryRecommendation:
 class UnifiedEvent:
     event_id: str
     timestamp: float
-    subsystem: str  # AgentGuard, CrashGuard, Core
+    subsystem: str  # AgentGuard, CrashGuard, Core, Test
     event_type: str
     severity: str  # info, warning, critical
     summary: str
     payload_json: str
     redacted: bool = False
+    is_simulated: bool = False
 

@@ -183,7 +183,7 @@ def test_simulated_alert_flag_and_reset():
     worker.detector.sustained_duration_seconds = 5.0
 
     # Trigger synthetic CPU demo
-    worker.trigger_synthetic_demo_load(metric_name="CPU", value=92.0)
+    worker.trigger_synthetic_demo_load(metric_name="CPU", value=95.0)
     assert worker._synthetic_override is not None
 
     # Sample snapshot
@@ -411,4 +411,4 @@ def test_main_window_alert_popup_integration(qapp, tmp_path):
         assert not window._alert_popup.isVisible()
 
     finally:
-        window.close()
+        window.exit_application()

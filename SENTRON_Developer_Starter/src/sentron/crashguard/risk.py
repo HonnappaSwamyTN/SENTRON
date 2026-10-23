@@ -1,8 +1,9 @@
-"""Sustained-Risk Detector for CrashGuard (AC-10).
+"""Sustained-Risk Detector for CrashGuard (AC-10, Requirements 1 & 5).
 
 Evaluates telemetry against sustained thresholds and duration windows.
+Single source of truth for the configurable 93% system resource-risk threshold.
 Filters out transient spikes. Enforces cooldown periods to prevent alert spam.
-Distinguishes resource pressure from definitive crash predictions.
+Distinguishes resource pressure (CPU/Memory at 93%) from advisory temperature warnings.
 """
 from __future__ import annotations
 
@@ -10,6 +11,10 @@ import time
 from uuid import uuid4
 
 from sentron.core.models import RiskAlert, SystemSnapshot
+from sentron.crashguard.process_control import ProcessController
+
+DEFAULT_RESOURCE_RISK_THRESHOLD: float = 93.0
+DEFAULT_TEMPERATURE_ADVISORY_THRESHOLD: float = 80.0
 
 
 class SustainedRiskDetector:
@@ -17,15 +22,19 @@ class SustainedRiskDetector:
 
     def __init__(
         self,
-        cpu_threshold: float = 85.0,
-        memory_threshold: float = 85.0,
+        resource_risk_threshold: float = DEFAULT_RESOURCE_RISK_THRESHOLD,
+        cpu_threshold: float | None = None,
+        memory_threshold: float | None = None,
         disk_free_gb_threshold: float = 5.0,
+        temperature_threshold: float = DEFAULT_TEMPERATURE_ADVISORY_THRESHOLD,
         sustained_duration_seconds: float = 30.0,
         cooldown_seconds: float = 60.0,
     ) -> None:
-        self.cpu_threshold = cpu_threshold
-        self.memory_threshold = memory_threshold
+        self.resource_risk_threshold = resource_risk_threshold
+        self.cpu_threshold = cpu_threshold if cpu_threshold is not None else resource_risk_threshold
+        self.memory_threshold = memory_threshold if memory_threshold is not None else resource_risk_threshold
         self.disk_free_gb_threshold = disk_free_gb_threshold
+        self.temperature_threshold = temperature_threshold
         self.sustained_duration_seconds = sustained_duration_seconds
         self.cooldown_seconds = cooldown_seconds
 
@@ -65,20 +74,30 @@ class SustainedRiskDetector:
         simulated = is_simulated or ("synthetic_demo_mode" in snapshot.unavailable_metrics)
         alerts: list[RiskAlert] = []
 
-        metrics_to_check = [
+        # Analyze main suspected contributor from genuine processes
+        controller = ProcessController.get_instance()
+        top_contrib, is_chrome, contrib_details = controller.analyze_contributor(snapshot)
+        contrib_proc = top_contrib.name if top_contrib else None
+        contrib_pid = top_contrib.pid if top_contrib else None
+
+        # Determine severity: at or above 95% is critical, otherwise warning
+        cpu_sev = "warning" if snapshot.cpu_percent < 95.0 else "critical"
+        mem_sev = "warning" if snapshot.memory_percent < 95.0 else "critical"
+
+        metrics_to_check: list[tuple[str, float, float, bool, str]] = [
             (
                 "CPU",
                 snapshot.cpu_percent,
                 self.cpu_threshold,
                 snapshot.cpu_percent >= self.cpu_threshold,
-                "warning" if snapshot.cpu_percent < 95.0 else "critical",
+                cpu_sev,
             ),
             (
                 "Memory",
                 snapshot.memory_percent,
                 self.memory_threshold,
                 snapshot.memory_percent >= self.memory_threshold,
-                "warning" if snapshot.memory_percent < 95.0 else "critical",
+                mem_sev,
             ),
             (
                 "DiskFreeGB",
@@ -88,6 +107,16 @@ class SustainedRiskDetector:
                 "warning" if (snapshot.disk_free_bytes / (1024**3)) > 1.0 else "critical",
             ),
         ]
+
+        # Temperature Advisory Warning (Clearly distinguished from 93% system resource risk)
+        if snapshot.cpu_temperature_c is not None:
+            metrics_to_check.append((
+                "CPUTemperature",
+                snapshot.cpu_temperature_c,
+                self.temperature_threshold,
+                snapshot.cpu_temperature_c >= self.temperature_threshold,
+                "warning",  # advisory
+            ))
 
         for metric_name, observed_val, thresh_val, is_breached, severity in metrics_to_check:
             if is_breached:
@@ -117,6 +146,9 @@ class SustainedRiskDetector:
                                 cooldown_until=cooldown_target,
                                 timestamp=current_time,
                                 is_simulated=simulated,
+                                contributor_process=contrib_proc,
+                                contributor_pid=contrib_pid,
+                                contributor_details=contrib_details,
                             )
                         )
             else:

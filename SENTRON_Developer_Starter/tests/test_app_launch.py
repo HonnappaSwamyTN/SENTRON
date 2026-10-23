@@ -69,4 +69,4 @@ def test_sentron_app_initialization_and_scenario_execution(qapp, tmp_path):
 
     finally:
         # Clean shutdown
-        window.close()
+        window.exit_application()

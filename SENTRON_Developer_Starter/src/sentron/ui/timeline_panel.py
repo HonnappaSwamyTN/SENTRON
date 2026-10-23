@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -30,6 +31,7 @@ class UnifiedTimelinePanel(QWidget):
     def __init__(self, event_store: EventStore, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.event_store = event_store
+        self._theme = "light"
         self._init_ui()
         self.refresh_timeline()
 
@@ -39,23 +41,23 @@ class UnifiedTimelinePanel(QWidget):
         layout.setSpacing(12)
 
         # Causality Disclaimer Banner (AC-16)
-        disclaimer_box = QFrame()
-        disclaimer_box.setStyleSheet(
-            "background-color: #1f242c; border-left: 4px solid #58a6ff; border-radius: 4px; padding: 10px;"
+        self.disclaimer_box = QFrame()
+        self.disclaimer_box.setStyleSheet(
+            "background-color: #FAF6ED; border-left: 4px solid #E2B83B; border-radius: 4px; padding: 10px;"
         )
-        disc_layout = QVBoxLayout(disclaimer_box)
-        lbl_disc_title = QLabel("ℹ️ Temporal Correlation Disclaimer (AC-16)")
-        lbl_disc_title.setStyleSheet("font-weight: 700; color: #58a6ff; font-size: 12px;")
-        lbl_disc_body = QLabel(
+        disc_layout = QVBoxLayout(self.disclaimer_box)
+        self.lbl_disc_title = QLabel("ℹ️ Temporal Correlation Disclaimer (AC-16)")
+        self.lbl_disc_title.setStyleSheet("font-weight: 700; color: #171717; font-size: 12px;")
+        self.lbl_disc_body = QLabel(
             "Temporal correlation between an AI-agent action and host resource pressure provides "
             "investigative context, NOT conclusive proof of causality. Other background processes, "
             "OS updates, or tasks may have caused or contributed to the observed system load."
         )
-        lbl_disc_body.setStyleSheet("color: #8b949e; font-size: 11px;")
-        lbl_disc_body.setWordWrap(True)
-        disc_layout.addWidget(lbl_disc_title)
-        disc_layout.addWidget(lbl_disc_body)
-        layout.addWidget(disclaimer_box)
+        self.lbl_disc_body.setStyleSheet("color: #4A453A; font-size: 11px;")
+        self.lbl_disc_body.setWordWrap(True)
+        disc_layout.addWidget(self.lbl_disc_title)
+        disc_layout.addWidget(self.lbl_disc_body)
+        layout.addWidget(self.disclaimer_box)
 
         # Search and filters row
         filter_row = QHBoxLayout()
@@ -65,7 +67,7 @@ class UnifiedTimelinePanel(QWidget):
         filter_row.addWidget(self.search_input, stretch=3)
 
         self.subsystem_filter = QComboBox()
-        self.subsystem_filter.addItems(["All Subsystems", "AgentGuard", "CrashGuard", "Core"])
+        self.subsystem_filter.addItems(["All Subsystems", "AgentGuard", "CrashGuard", "Test", "Core"])
         self.subsystem_filter.currentTextChanged.connect(self.refresh_timeline)
         filter_row.addWidget(self.subsystem_filter, stretch=1)
 
@@ -90,6 +92,24 @@ class UnifiedTimelinePanel(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
         layout.addWidget(self.table)
 
+    def set_theme(self, theme_name: str) -> None:
+        """Update disclaimer banner and table text colors to match the active theme."""
+        self._theme = (theme_name or "light").lower()
+        is_dark = self._theme == "dark"
+        if is_dark:
+            self.disclaimer_box.setStyleSheet(
+                "background-color: #2D2200; border-left: 4px solid #E2B83B; border-radius: 4px; padding: 10px;"
+            )
+            self.lbl_disc_title.setStyleSheet("font-weight: 700; color: #F5F2E9; font-size: 12px;")
+            self.lbl_disc_body.setStyleSheet("color: #D9D4C8; font-size: 11px;")
+        else:
+            self.disclaimer_box.setStyleSheet(
+                "background-color: #FAF6ED; border-left: 4px solid #E2B83B; border-radius: 4px; padding: 10px;"
+            )
+            self.lbl_disc_title.setStyleSheet("font-weight: 700; color: #171717; font-size: 12px;")
+            self.lbl_disc_body.setStyleSheet("color: #4A453A; font-size: 11px;")
+        self.refresh_timeline()
+
     def refresh_timeline(self) -> None:
         """Query and populate the timeline table from SQLite storage."""
         query = self.search_input.text().strip()
@@ -105,22 +125,40 @@ class UnifiedTimelinePanel(QWidget):
             limit=100,
         )
 
-        self.table.setRowCount(len(events))
+        is_dark = getattr(self, "_theme", "light") == "dark"
+        if is_dark:
+            crit_color = QColor("#EF4444")
+            warn_color = QColor("#F59E0B")
+            info_color = QColor("#58A6FF")
+            default_fg = QColor("#F5F2E9")
+        else:
+            crit_color = QColor("#CF222E")
+            warn_color = QColor("#8A4500")
+            info_color = QColor("#0969DA")
+            default_fg = QColor("#171717")
+
+        if self.table.rowCount() != len(events):
+            self.table.setRowCount(len(events))
         for idx, ev in enumerate(events):
             time_str = datetime.datetime.fromtimestamp(ev.timestamp).strftime("%H:%M:%S")
-            self.table.setItem(idx, 0, QTableWidgetItem(time_str))
-            self.table.setItem(idx, 1, QTableWidgetItem(ev.subsystem))
-            self.table.setItem(idx, 2, QTableWidgetItem(ev.event_type))
-
-            sev_item = QTableWidgetItem(ev.severity.upper())
-            if ev.severity == "critical":
-                sev_item.setForeground(Qt.red)
-            elif ev.severity == "warning":
-                sev_item.setForeground(Qt.yellow)
-            else:
-                sev_item.setForeground(Qt.cyan)
-            self.table.setItem(idx, 3, sev_item)
-
-            self.table.setItem(idx, 4, QTableWidgetItem(ev.summary))
+            sev_color = crit_color if ev.severity == "critical" else (warn_color if ev.severity == "warning" else info_color)
             red_str = "YES [Sanitized]" if ev.redacted else "No"
-            self.table.setItem(idx, 5, QTableWidgetItem(red_str))
+
+            cells = [
+                (0, time_str, default_fg),
+                (1, ev.subsystem, default_fg),
+                (2, ev.event_type, default_fg),
+                (3, ev.severity.upper(), sev_color),
+                (4, ev.summary, default_fg),
+                (5, red_str, default_fg),
+            ]
+
+            for col_idx, text_val, fg in cells:
+                item = self.table.item(idx, col_idx)
+                if item is None:
+                    item = QTableWidgetItem(text_val)
+                    item.setForeground(fg)
+                    self.table.setItem(idx, col_idx, item)
+                else:
+                    item.setText(text_val)
+                    item.setForeground(fg)

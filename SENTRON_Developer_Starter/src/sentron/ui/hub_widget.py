@@ -8,9 +8,20 @@ Unambiguous click handling ensures stability and clear user control.
 from __future__ import annotations
 
 import datetime
-from PySide6.QtCore import Qt, QPoint
-from PySide6.QtGui import QMouseEvent, QPainter, QColor, QPen, QFont
+import weakref
+from PySide6.QtCore import Qt, QPoint, QPointF, QRectF
+from PySide6.QtGui import (
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QColor,
+    QPen,
+    QBrush,
+    QFont,
+    QCursor,
+)
 from PySide6.QtWidgets import (
+    QApplication,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -22,16 +33,166 @@ from PySide6.QtWidgets import (
 )
 
 
+class CircularShieldView(QWidget):
+    """Circular launcher icon view with precise centering and hover close control."""
+
+    def __init__(self, hub: FloatingHubWidget) -> None:
+        super().__init__()
+        self._hub_ref = weakref.ref(hub)
+        self._is_hovered = False
+        self.setObjectName("shieldView")
+        self.setAttribute(Qt.WA_Hover, True)
+        self.setMouseTracking(True)
+
+        # Small 'x' close control overlay near upper-right edge
+        self.btn_exit = QPushButton("✕", self)
+        self.btn_exit.setObjectName("btnShieldExit")
+        self.btn_exit.setToolTip("Exit SENTRON")
+        self.btn_exit.setFixedSize(16, 16)
+        self.btn_exit.setStyleSheet("""
+            QPushButton#btnShieldExit {
+                background-color: #212121;
+                color: #D9D4C8;
+                border: 1px solid #E2B83B;
+                border-radius: 8px;
+                font-size: 10px;
+                font-weight: 800;
+                padding: 0px;
+            }
+            QPushButton#btnShieldExit:hover {
+                background-color: #C42B1C;
+                color: #FFFFFF;
+                border: 1px solid #FF6B6B;
+            }
+        """)
+        self.btn_exit.hide()
+        self.btn_exit.clicked.connect(self._on_exit_clicked)
+        self._update_exit_button_pos()
+
+        # Backward compatibility dummy label
+        self.lbl_shield_icon = QLabel(self)
+        self.lbl_shield_icon.hide()
+
+    def _update_exit_button_pos(self) -> None:
+        w = self.width()
+        btn_x = max(0, w - 18)
+        self.btn_exit.move(btn_x, 2)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_exit_button_pos()
+
+    def enterEvent(self, event) -> None:
+        self._is_hovered = True
+        self.btn_exit.show()
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        cur_pos = self.mapFromGlobal(QCursor.pos())
+        if not self.rect().contains(cur_pos):
+            self._is_hovered = False
+            self.btn_exit.hide()
+            self.update()
+        super().leaveEvent(event)
+
+    @property
+    def hub(self) -> FloatingHubWidget | None:
+        return self._hub_ref() if self._hub_ref else None
+
+    def _on_exit_clicked(self) -> None:
+        hub = self.hub
+        if hub is not None:
+            hub.hide()
+            if hub.on_exit_app:
+                hub.on_exit_app()
+                return
+        app = QApplication.instance()
+        if app:
+            app.quit()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        w = self.width()
+        h = self.height()
+        d = min(w, h)
+        cx = w / 2.0
+        cy = h / 2.0
+        r = (d - 3.0) / 2.0
+
+        # Circular background & border (strictly anti-aliased true circle)
+        if self._is_hovered:
+            pen = QPen(QColor("#F0C952"), 2.0)
+            brush = QBrush(QColor("#212121"))
+        else:
+            pen = QPen(QColor("#E2B83B"), 1.5)
+            brush = QBrush(QColor("#171717"))
+
+        painter.setPen(pen)
+        painter.setBrush(brush)
+        painter.drawEllipse(QPointF(cx, cy), r, r)
+
+        # Golden-yellow shield icon precisely centered
+        sw = d * 0.44
+        sh = d * 0.52
+        top = cy - sh / 2.0
+        bottom = cy + sh / 2.0
+        left = cx - sw / 2.0
+        right = cx + sw / 2.0
+
+        path = QPainterPath()
+        path.moveTo(cx, top)
+        path.lineTo(right, top + sh * 0.08)
+        path.lineTo(right, cy)
+        path.cubicTo(right, cy + sh * 0.25, cx + sw * 0.2, bottom - sh * 0.08, cx, bottom)
+        path.cubicTo(cx - sw * 0.2, bottom - sh * 0.08, left, cy + sh * 0.25, left, cy)
+        path.lineTo(left, top + sh * 0.08)
+        path.closeSubpath()
+
+        shield_color = QColor("#F0C952") if self._is_hovered else QColor("#E2B83B")
+        painter.setPen(QPen(shield_color, 1.2))
+        painter.setBrush(QBrush(shield_color))
+        painter.drawPath(path)
+
+        # Subtle dark inner shield core for crisp security depth
+        in_w = sw * 0.60
+        in_h = sh * 0.60
+        in_top = cy - in_h / 2.0 + 1.0
+        in_bottom = cy + in_h / 2.0
+        in_left = cx - in_w / 2.0
+        in_right = cx + in_w / 2.0
+
+        inner_path = QPainterPath()
+        inner_path.moveTo(cx, in_top)
+        inner_path.lineTo(in_right, in_top + in_h * 0.08)
+        inner_path.lineTo(in_right, cy)
+        inner_path.cubicTo(in_right, cy + in_h * 0.22, cx + in_w * 0.2, in_bottom - in_h * 0.08, cx, in_bottom)
+        inner_path.cubicTo(cx - in_w * 0.2, in_bottom - in_h * 0.08, in_left, cy + in_h * 0.22, in_left, cy)
+        inner_path.lineTo(in_left, in_top + in_h * 0.08)
+        inner_path.closeSubpath()
+
+        core_color = QColor("#212121") if self._is_hovered else QColor("#171717")
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(core_color))
+        painter.drawPath(inner_path)
+
+
 class FloatingHubWidget(QWidget):
-    """Movable floating shield launcher with expandable compact status panel."""
+    """Movable floating circular shield launcher with expandable compact status panel."""
 
     def __init__(
         self,
         on_toggle_dashboard: callable | None = None,
+        on_exit_app: callable | None = None,
+        shield_size: int = 48,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.on_toggle_dashboard = on_toggle_dashboard
+        self.on_exit_app = on_exit_app
+        self._shield_size = shield_size
         self._drag_pos = QPoint()
         self._press_pos = QPoint()
         self._is_dragging = False
@@ -44,9 +205,9 @@ class FloatingHubWidget(QWidget):
         self._last_disk_gb: float | None = None
         self._is_active = True
 
-        # Always-on-top, frameless utility window
+        # Always-on-top, frameless utility window with translucent background
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
-        self.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
 
         self._init_ui()
         self.collapse()
@@ -55,44 +216,19 @@ class FloatingHubWidget(QWidget):
         self.setObjectName("floatingHub")
         self.setStyleSheet("""
             QWidget#floatingHub {
-                background-color: #171717;
-                border: 1px solid #E2B83B;
-                border-radius: 8px;
+                background: transparent;
+                border: none;
             }
         """)
 
-        # Root layout with stacked views: Collapsed Shield vs Expanded Panel
+        # Root layout with stacked views: Collapsed Circular Shield vs Expanded Panel
         self.root_stack = QStackedLayout(self)
         self.root_stack.setContentsMargins(0, 0, 0, 0)
 
         # -------------------------------------------------------------
-        # View 0: Collapsed Shield Launcher (Compact 50x50 icon)
+        # View 0: Collapsed Circular Shield Launcher (Default 48x48)
         # -------------------------------------------------------------
-        self.shield_view = QWidget()
-        self.shield_view.setObjectName("shieldView")
-        self.shield_view.setStyleSheet("""
-            QWidget#shieldView {
-                background-color: #171717;
-                border: 1.5px solid #E2B83B;
-                border-radius: 25px;
-            }
-            QWidget#shieldView:hover {
-                border: 2px solid #F0C952;
-                background-color: #212121;
-            }
-        """)
-        shield_layout = QVBoxLayout(self.shield_view)
-        shield_layout.setContentsMargins(0, 0, 0, 0)
-        shield_layout.setAlignment(Qt.AlignCenter)
-
-        self.lbl_shield_icon = QLabel("🛡️")
-        self.lbl_shield_icon.setAlignment(Qt.AlignCenter)
-        self.lbl_shield_icon.setStyleSheet("""
-            font-size: 24px;
-            color: #E2B83B;
-            background: transparent;
-        """)
-        shield_layout.addWidget(self.lbl_shield_icon)
+        self.shield_view = CircularShieldView(self)
         self.root_stack.addWidget(self.shield_view)
 
         # -------------------------------------------------------------
@@ -233,11 +369,18 @@ class FloatingHubWidget(QWidget):
         self.update()
 
     def collapse(self) -> None:
-        """Collapse into the single compact shield launcher."""
+        """Collapse into the single compact circular shield launcher."""
         self._expanded = False
         self.root_stack.setCurrentIndex(0)
-        self.setFixedSize(50, 50)
+        self.setFixedSize(self._shield_size, self._shield_size)
         self.update()
+
+    def set_shield_size(self, size: int) -> None:
+        """Set the circular shield diameter, maintaining equal width and height."""
+        self._shield_size = max(24, size)
+        if not self._expanded:
+            self.setFixedSize(self._shield_size, self._shield_size)
+            self.update()
 
     def toggle_expanded(self) -> None:
         """Toggle between collapsed shield and expanded status panel."""
@@ -324,6 +467,11 @@ class FloatingHubWidget(QWidget):
     # -------------------------------------------------------------
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton:
+            if not self._expanded and self.shield_view.btn_exit.isVisible():
+                btn_rect = self.shield_view.btn_exit.geometry()
+                if btn_rect.contains(event.position().toPoint()):
+                    event.accept()
+                    return
             self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             self._press_pos = event.globalPosition().toPoint()
             self._is_dragging = False
@@ -339,7 +487,29 @@ class FloatingHubWidget(QWidget):
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton:
+            if not self._expanded and self.shield_view.btn_exit.isVisible():
+                btn_rect = self.shield_view.btn_exit.geometry()
+                if btn_rect.contains(event.position().toPoint()):
+                    event.accept()
+                    return
             # If user clicked collapsed shield without dragging, expand panel
             if not self._is_dragging and not self._expanded:
                 self.expand()
             event.accept()
+
+    @property
+    def btn_exit(self) -> QPushButton:
+        return self.shield_view.btn_exit
+
+    @property
+    def btn_close(self) -> QPushButton:
+        return self.shield_view.btn_exit
+
+    @property
+    def lbl_shield_icon(self) -> QLabel:
+        return self.shield_view.lbl_shield_icon
+
+    def closeEvent(self, event) -> None:
+        self.on_toggle_dashboard = None
+        self.on_exit_app = None
+        super().closeEvent(event)

@@ -95,7 +95,7 @@ def test_crashguard_panel_fallback_warnings_display(qapp):
 def test_main_window_evidence_flow_and_timeline_integration(qapp, tmp_path):
     """End-to-end evidence event flow into CrashGuard UI, EventStore persistence, and Unified Timeline."""
     db_file = tmp_path / "test_evidence_flow.db"
-    app, window = create_application(db_path=db_file)
+    app, window = create_application(db_path=db_file, start_worker=False)
 
     try:
         ev = WindowsEvidence(
@@ -127,4 +127,4 @@ def test_main_window_evidence_flow_and_timeline_integration(qapp, tmp_path):
         assert window.timeline_panel.table.rowCount() >= 1
 
     finally:
-        window.close()
+        window.exit_application()

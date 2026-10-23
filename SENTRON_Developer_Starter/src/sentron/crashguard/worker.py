@@ -25,8 +25,9 @@ from sentron.crashguard.evidence import (
     save_seen_ids_to_json,
 )
 from sentron.crashguard.metrics import MetricsCollector
+from sentron.crashguard.process_control import ProcessController
 from sentron.crashguard.recovery import SafeRecoveryAdvisor
-from sentron.crashguard.risk import SustainedRiskDetector
+from sentron.crashguard.risk import DEFAULT_RESOURCE_RISK_THRESHOLD, SustainedRiskDetector
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -54,9 +55,14 @@ class MonitoringWorker:
         self.interval_seconds = interval_seconds
         self.buffer_capacity = buffer_capacity
         self.collector = collector or MetricsCollector()
-        self.detector = detector or SustainedRiskDetector(sustained_duration_seconds=10.0, cooldown_seconds=30.0)
+        self.detector = detector or SustainedRiskDetector(
+            resource_risk_threshold=DEFAULT_RESOURCE_RISK_THRESHOLD,
+            sustained_duration_seconds=10.0,
+            cooldown_seconds=30.0,
+        )
         self.advisor = advisor or SafeRecoveryAdvisor()
         self.evidence_collector = evidence_collector or WindowsEvidenceCollector()
+        self.process_controller = ProcessController.get_instance()
         self.event_store = event_store
         self.evidence_interval_seconds = evidence_interval_seconds
         self.state_file_path = state_file_path
@@ -102,7 +108,7 @@ class MonitoringWorker:
         self._thread.start()
 
     def stop(self, timeout: float = 2.0) -> None:
-        """Cleanly stop worker thread within timeout."""
+        """Cleanly stop worker thread within timeout and safely resume any paused processes."""
         t_start = time.time()
         self._stop_event.set()
         self._wake_event.set()
@@ -127,6 +133,12 @@ class MonitoringWorker:
             save_seen_ids_to_json(self._seen_evidence_ids, self.state_file_path)
 
 
+        # Release any processes suspended by SENTRON so none remain held
+        try:
+            self.process_controller.resume_all_suspended()
+        except Exception:
+            pass
+
     def get_latest_snapshot(self) -> SystemSnapshot | None:
         """Return the most recent snapshot in buffer."""
         with self._lock:
@@ -137,7 +149,7 @@ class MonitoringWorker:
         with self._lock:
             return list(self.snapshot_buffer)
 
-    def trigger_synthetic_demo_load(self, metric_name: str = "CPU", value: float = 92.0) -> None:
+    def trigger_synthetic_demo_load(self, metric_name: str = "CPU", value: float = 94.0) -> None:
         """Inject a synthetic high-load snapshot for demonstration testing.
 
         Backdates the sustained breach window so the demonstration transition alert
@@ -146,6 +158,13 @@ class MonitoringWorker:
         base = self.collector.collect_snapshot(top_n_processes=3)
         cpu_val = value if metric_name == "CPU" else base.cpu_percent
         mem_val = value if metric_name == "Memory" else base.memory_percent
+        temp_val = value if metric_name == "CPUTemperature" else base.cpu_temperature_c
+        temp_status = "available" if metric_name == "CPUTemperature" else base.cpu_temperature_status
+        temp_reason = (
+            "Simulated thermal zone [SIMULATED / TEST DATA]"
+            if metric_name == "CPUTemperature"
+            else base.cpu_temperature_reason
+        )
 
         synthetic = SystemSnapshot(
             timestamp=time.time(),
@@ -156,6 +175,9 @@ class MonitoringWorker:
             disk_busy_percent=base.disk_busy_percent,
             top_processes=base.top_processes,
             unavailable_metrics=("synthetic_demo_mode",),
+            cpu_temperature_c=temp_val,
+            cpu_temperature_status=temp_status,
+            cpu_temperature_reason=temp_reason,
         )
         self._synthetic_override = synthetic
 
@@ -175,6 +197,7 @@ class MonitoringWorker:
         self.detector.reset_metric("CPU")
         self.detector.reset_metric("Memory")
         self.detector.reset_metric("DiskFreeGB")
+        self.detector.reset_metric("CPUTemperature")
         self._wake_event.set()
 
     def is_severe_load(self, snapshot: SystemSnapshot) -> bool:
@@ -302,10 +325,10 @@ class MonitoringWorker:
                 except Exception:
                     pass
 
-        # Trigger evidence collection on sustained-risk alert or conservative interval (30-60s)
+        # Trigger evidence collection on authentic sustained-risk alert or conservative interval (30-60s)
         # Suppressed under severe load (>95% CPU or >95% RAM) to prevent system strain (Security Rules §7.3)
         now = time.time()
-        has_risk_alert = len(alerts) > 0
+        has_risk_alert = len(alerts) > 0 and not is_simulated
         interval_due = (
             self._last_evidence_time == 0.0 or (now - self._last_evidence_time >= self.evidence_interval_seconds)
         )

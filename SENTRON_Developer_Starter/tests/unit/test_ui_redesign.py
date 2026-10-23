@@ -154,7 +154,7 @@ def test_main_window_three_section_ordering_and_continuous_scroll(qapp, tmp_path
         assert window.timeline_panel.parent() is not None
 
     finally:
-        window.close()
+        window.exit_application()
 
 
 @pytest.mark.unit
@@ -196,7 +196,7 @@ def test_navigation_bar_scroll_destinations_and_indicator(qapp, tmp_path):
         assert window.btn_nav_crashguard.objectName() == "navBtnActive"
 
     finally:
-        window.close()
+        window.exit_application()
 
 
 @pytest.mark.unit
@@ -244,7 +244,7 @@ def test_demo_panel_simulation_labeling_and_safety_controls(qapp, tmp_path):
         qapp.processEvents()
         assert "[SIMULATED DEMO: CPU STRESS]" in demo.crash_demo_output.toPlainText()
         assert window.worker._synthetic_override is not None
-        assert window.worker._synthetic_override.cpu_percent == 92.0
+        assert window.worker._synthetic_override.cpu_percent == 95.0
 
         # 6. Restore to Authentic Live
         demo.btn_crash_restore.click()
@@ -253,4 +253,4 @@ def test_demo_panel_simulation_labeling_and_safety_controls(qapp, tmp_path):
         assert window.worker._synthetic_override is None
 
     finally:
-        window.close()
+        window.exit_application()

@@ -238,3 +238,105 @@ def test_session_id_and_secret_redaction_combined():
     assert results[0].redacted is True
 
 
+def test_schema_migration_from_old_schema_without_is_simulated(tmp_path):
+    """Verify that an existing SQLite database with the old schema is safely migrated without data loss."""
+    import sqlite3
+    db_file = tmp_path / "old_schema_test.db"
+
+    # 1. Create database with legacy schema (lacking is_simulated column and index)
+    conn = sqlite3.connect(db_file)
+    conn.executescript("""
+        CREATE TABLE events (
+            event_id TEXT PRIMARY KEY,
+            timestamp REAL NOT NULL,
+            subsystem TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            redacted INTEGER DEFAULT 0
+        );
+        CREATE INDEX idx_events_timestamp ON events(timestamp);
+        CREATE INDEX idx_events_subsystem ON events(subsystem);
+        CREATE INDEX idx_events_event_type ON events(event_type);
+        INSERT INTO events VALUES (
+            'old-act-1',
+            1710000000.0,
+            'AgentGuard',
+            'policy_decision',
+            'info',
+            'Legacy event before schema update',
+            '{"action_id": "old-act-1", "agent_id": "legacy-agent"}',
+            0
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+    # 2. Initialize SqliteAuditLog on the old database (must succeed without OperationalError)
+    audit = SqliteAuditLog(db_file)
+
+    # 3. Check that is_simulated column now exists
+    cursor = audit._conn.execute("PRAGMA table_info(events)")
+    cols = {row[1]: row for row in cursor.fetchall()}
+    assert "is_simulated" in cols
+    # Column should default to 0
+    assert str(cols["is_simulated"][4]) == "0"
+
+    # 4. Check that idx_events_is_simulated index exists
+    idx_cur = audit._conn.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_events_is_simulated'")
+    assert idx_cur.fetchone() is not None
+
+    # 5. Check that existing legacy record was preserved intact and defaults to not simulated
+    events = audit.get_recent_events(limit=5)
+    assert len(events) == 1
+    assert events[0].event_id == "old-act-1"
+    assert events[0].is_simulated is False
+    assert events[0].is_test_data is False
+    assert "Legacy event before schema update" in events[0].summary
+
+    # 6. Verify repeated initialization on the same migrated database is completely idempotent
+    audit.close()
+    audit_second = SqliteAuditLog(db_file)
+    events_second = audit_second.get_recent_events(limit=5)
+    assert len(events_second) == 1
+    assert events_second[0].event_id == "old-act-1"
+
+    # 7. Record a new simulated event and verify it is distinguished
+    sim_event = AuditEvent(
+        event_type="policy_decision",
+        action_id="new-sim-act",
+        agent_id="test-agent",
+        is_simulated=True,
+        explanation="Simulated scenario run.",
+    )
+    audit_second.record_event(sim_event)
+
+    all_events = audit_second.get_recent_events(limit=10)
+    assert len(all_events) == 2
+    assert all_events[0].is_simulated is True
+    assert all_events[1].is_simulated is False
+
+    # Genuine-only filter returns only the legacy genuine event
+    genuine_events = audit_second.get_recent_events(limit=10, genuine_only=True)
+    assert len(genuine_events) == 1
+    assert genuine_events[0].event_id == "old-act-1"
+
+    audit_second.close()
+
+
+def test_schema_initialization_on_brand_new_database(tmp_path):
+    """Verify clean initialization on a fresh database file."""
+    db_file = tmp_path / "fresh_database.db"
+    audit = SqliteAuditLog(db_file)
+
+    cursor = audit._conn.execute("PRAGMA table_info(events)")
+    col_names = {row[1] for row in cursor.fetchall()}
+    assert "is_simulated" in col_names
+
+    idx_cur = audit._conn.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_events_is_simulated'")
+    assert idx_cur.fetchone() is not None
+
+    audit.close()
+
+

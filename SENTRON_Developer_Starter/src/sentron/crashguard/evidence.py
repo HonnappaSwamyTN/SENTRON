@@ -139,6 +139,7 @@ def make_evidence_unified_event(
         "confirmed_observation": confirmed,
         "inferred_hypothesis": inferred,
         "is_confirmed_os_evidence": True,
+        "is_simulated": evidence.is_simulated,
     }
 
     return UnifiedEvent(
@@ -150,6 +151,7 @@ def make_evidence_unified_event(
         summary=confirmed,
         payload_json=json.dumps(payload),
         redacted=False,
+        is_simulated=evidence.is_simulated,
     )
 
 

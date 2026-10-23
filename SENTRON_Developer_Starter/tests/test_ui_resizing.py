@@ -59,4 +59,4 @@ def test_main_window_free_resizing_and_min_dimensions(qapp, tmp_path):
         qapp.processEvents()
 
     finally:
-        window.close()
+        window.exit_application()

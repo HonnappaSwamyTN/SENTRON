@@ -123,6 +123,27 @@ class SafeRecoveryAdvisor:
                 )
             )
 
+        # 5. Elevated CPU Temperature guidance (Advisory)
+        if alert and alert.metric_name == "CPUTemperature":
+            recommendations.append(
+                RecoveryRecommendation(
+                    recommendation_id=str(uuid4()),
+                    severity="warning",
+                    title="Elevated CPU Temperature Advisory",
+                    suggested_action=(
+                        f"Observed CPU temperature of {alert.observed_value:.1f}°C is elevated (advisory threshold: {alert.threshold_value:.1f}°C). "
+                        "Check device ventilation and consider reducing heavy compute loads. Note: This warning is an advisory notification, not a universal hardware safety limit."
+                    ),
+                    confirmed_observations=(
+                        f"CPU hardware sensor reading: {alert.observed_value:.1f}°C sustained for {alert.duration_seconds:.0f}s.",
+                    ),
+                    suspected_causes=(
+                        "Prolonged compute workload, restricted airflow, or elevated ambient room temperature.",
+                    ),
+                    is_automated=False,
+                )
+            )
+
         return recommendations
 
     def generate_evidence_recommendations(

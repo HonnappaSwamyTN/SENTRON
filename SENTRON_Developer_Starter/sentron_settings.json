@@ -1,0 +1,7 @@
+{
+  "theme": "light",
+  "resource_risk_threshold": 93.0,
+  "temperature_warning_threshold": 80.0,
+  "sustained_duration_seconds": 10.0,
+  "cooldown_seconds": 30.0
+}

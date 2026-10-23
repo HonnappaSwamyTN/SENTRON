@@ -138,7 +138,7 @@ def test_full_cross_subsystem_security_and_health_pipeline(tmp_path: Path):
     sustained_detector._first_breach_time["CPU"] = now - 6.0
     fake_snapshot = SystemSnapshot(
         timestamp=now,
-        cpu_percent=92.5,
+        cpu_percent=94.5,
         memory_percent=60.0,
         memory_available_bytes=4 * 1024**3,
         disk_free_bytes=50 * 1024**3,
@@ -150,7 +150,7 @@ def test_full_cross_subsystem_security_and_health_pipeline(tmp_path: Path):
     assert len(alerts) == 1
     alert = alerts[0]
     assert alert.metric_name == "CPU"
-    assert alert.observed_value == 92.5
+    assert alert.observed_value == 94.5
 
     advisor = SafeRecoveryAdvisor()
     recs = advisor.generate_recommendations(alert, fake_snapshot)
